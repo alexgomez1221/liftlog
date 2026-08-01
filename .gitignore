@@ -1,0 +1,11 @@
+.DS_Store
+**/.DS_Store
+Thumbs.db
+*.zip
+*.tgz
+node_modules/
+.vercel
+.env
+.env.local
+*.log
+liftlog-backup-*.json

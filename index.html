@@ -24,6 +24,7 @@
     --ss1:#8b5cf6; --ss2:#ec4899; --ss3:#14b8a6; --ss4:#f97316;
     --r:12px;
     --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-t: env(safe-area-inset-top, 0px);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   html,body{margin:0;padding:0;height:100%;}
@@ -31,7 +32,7 @@
     -webkit-user-select:none;user-select:none;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     background:var(--bg);color:var(--text);font-size:15px;line-height:1.4;
-    overscroll-behavior-y:none;
+    overscroll-behavior-y:none;overflow:hidden;
   }
   input,select,textarea,button{font-family:inherit;font-size:inherit;}
   input,textarea{-webkit-user-select:text;user-select:text;}
@@ -42,11 +43,21 @@
   a{color:var(--accent);}
 
   /* ---------- layout ---------- */
-  #app{display:flex;flex-direction:column;height:100%;max-width:560px;margin:0 auto;position:relative;}
-  main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 14px calc(80px + var(--safe-b));}
+  /* iOS standalone: the web view runs edge-to-edge under the Dynamic Island /
+     notch, so the shell must inset itself by the top safe area or the header
+     lands underneath it. 100dvh tracks the real visible height (100% resolves
+     against a viewport that ignores the status bar, leaving a gap at the foot). */
+  #app{
+    display:flex;flex-direction:column;
+    height:100vh;height:100dvh;
+    padding-top:var(--safe-t);
+    max-width:560px;margin:0 auto;position:relative;
+  }
+  main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 14px 24px;}
   .screen{display:none;}
   .screen.active{display:block;}
-  .screen-head{padding:18px 2px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:0;background:var(--bg);z-index:5;}
+  .screen-head{padding:14px 0 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:0;background:var(--bg);z-index:5;}
+  .screen-head .iconbtn{padding:10px;margin:-10px -6px -10px 0;}  /* bigger tap target, no visual shift */
   .screen-head h1{font-size:24px;letter-spacing:-.02em;}
 
   nav.tabbar{

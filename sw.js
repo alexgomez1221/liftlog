@@ -5,7 +5,7 @@
  * Bump CACHE_VERSION whenever you ship changes so phones pick them up.
  * On iOS you must force-close the app (swipe up) and reopen for the new SW to activate.
  */
-const CACHE_VERSION = 'liftlog-v2';
+const CACHE_VERSION = 'liftlog-v4';
 const SHELL = [
   './',
   './index.html',

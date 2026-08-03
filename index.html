@@ -356,12 +356,12 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 4;
+const BUILD = 5;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
 // via getComputedStyle in a way that reports the resolved pixel value.
-function layoutDiag(){
+function probeInsets(){
   let t=0,b=0;
   try{
     const p = document.createElement('div');
@@ -371,12 +371,39 @@ function layoutDiag(){
     t = p.offsetHeight; b = p.offsetWidth;
     p.remove();
   }catch(e){}
+  return {t, b};
+}
+
+/* An installed iOS PWA whose status bar is translucent lays content out starting
+   at screen y=0, but reports window.innerHeight as the screen height MINUS the
+   status bar. The result is a dead strip at the foot of the page exactly as tall
+   as the status bar. Detect that specific mismatch and set the height explicitly.
+   (Note: the status-bar meta tag is captured when the app is added to the home
+   screen, so changing it only takes effect after removing and re-adding the app.
+   This correction makes the layout right either way.) */
+function fitAppHeight(){
+  const el = document.getElementById('app');
+  if(!el) return null;
+  const ins = probeInsets();
+  const ih = window.innerHeight;
+  const sh = (window.screen && window.screen.height) || ih;
+  const missing = sh - ih;
+  const translucentQuirk = ins.t > 0 && Math.abs(missing - ins.t) <= 2;
+  if(translucentQuirk) el.style.height = (ih + ins.t) + 'px';
+  else el.style.height = '';
+  return translucentQuirk;
+}
+
+function layoutDiag(){
+  const ins = probeInsets();
   const appEl = document.getElementById('app');
   return {
-    safeTop: t, safeBottom: b,
+    safeTop: ins.t, safeBottom: ins.b,
     innerH: window.innerHeight,
+    screenH: (window.screen && window.screen.height) || 0,
     appH: appEl ? appEl.offsetHeight : 0,
     appPadTop: appEl ? Math.round(parseFloat(getComputedStyle(appEl).paddingTop)||0) : 0,
+    fitted: appEl ? !!appEl.style.height : false,
     standalone: (window.navigator.standalone === true) ||
                 (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
   };
@@ -2238,8 +2265,9 @@ el('settingsBtn').onclick = ()=>{
     const dg = root.querySelector('#stDiag');
     if(dg){
       const d = layoutDiag();
-      dg.textContent = `safe-area ${d.safeTop}/${d.safeBottom} · vh ${d.innerH} · app ${d.appH}` +
-                       ` · pad ${d.appPadTop} · ${d.standalone?'installed':'browser'}`;
+      dg.textContent = `safe ${d.safeTop}/${d.safeBottom} · vh ${d.innerH} · screen ${d.screenH}` +
+                       ` · app ${d.appH} · pad ${d.appPadTop} · ${d.fitted?'fitted':'auto'}` +
+                       ` · ${d.standalone?'installed':'browser'}`;
     }
     storageInfo().then(si=>{
       const n = root.querySelector('#stPersist');
@@ -2334,6 +2362,10 @@ function registerSW(){
 }
 
 function init(){
+  fitAppHeight();
+  ['resize','orientationchange','pageshow'].forEach(ev=>
+    window.addEventListener(ev, ()=>setTimeout(fitAppHeight, 60)));
+  if(window.visualViewport) window.visualViewport.addEventListener('resize', ()=>setTimeout(fitAppHeight, 60));
   renderAll();
   registerSW();
   requestPersistence();

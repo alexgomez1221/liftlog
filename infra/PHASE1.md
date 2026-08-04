@@ -178,7 +178,41 @@ aws sts get-caller-identity
 
 You'll be prompted for your MFA code. It should print the `LiftlogAdmin` role ARN — **not** the user ARN. The CLI caches the temporary credentials and re-prompts when they expire, so you enter a code roughly once per session.
 
-Add `export AWS_PROFILE=liftlog` to your `~/.zshrc` so every new terminal picks it up.
+### 3e. A third profile, for Terraform
+
+The `liftlog` profile works for the AWS CLI but **not** for Terraform. Running `terraform plan` with it fails:
+
+```
+Error: assume role with MFA enabled, but AssumeRoleTokenProvider session option not set.
+```
+
+That isn't a misconfiguration. The AWS SDK deliberately refuses to prompt for an MFA code — blocking indefinitely on input that may never arrive is dangerous for an automated tool — so it errors instead. The CLI has no such restriction.
+
+The fix is to let the CLI resolve credentials and pass them to Terraform. Add a third profile to `~/.aws/config`:
+
+```ini
+[profile liftlog-tf]
+credential_process = aws configure export-credentials --profile liftlog
+region             = us-east-1
+```
+
+`credential_process` makes the SDK shell out to the AWS CLI, which prompts for MFA and returns temporary credentials as JSON. Terraform never has to prompt.
+
+Use this profile for every Terraform command:
+
+```bash
+export AWS_PROFILE=liftlog-tf
+```
+
+Put that in `~/.zshrc` so new terminals pick it up. Both profiles remain valid — `liftlog` for ad-hoc CLI work, `liftlog-tf` for Terraform — and either is fine for both, so defaulting to `liftlog-tf` is simplest.
+
+**Per-session alternative,** if you'd rather not edit the config:
+
+```bash
+eval "$(aws configure export-credentials --profile liftlog --format env)"
+```
+
+That exports `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` into the current shell. Same effect, but you re-run it when the session expires after about an hour.
 
 ### If you'd rather have Identity Center
 
@@ -263,7 +297,7 @@ If it prints `user/<USERNAME>` instead, `AWS_PROFILE` is pointing at the base pr
 The `infra/` folder goes in the root of your existing `liftlog` repo, alongside `index.html`.
 
 ```bash
-cd ~/Documents/liftlog/infra/bootstrap
+cd <your-repo>/infra/bootstrap
 cp terraform.tfvars.example terraform.tfvars
 ```
 
@@ -279,12 +313,15 @@ Stay with `us-east-1` unless you have a reason not to:
 
 If you'd rather use Ohio, set `aws_region = "us-east-2"` in `terraform.tfvars` and change the `region` in both `~/.aws/config` profiles to match. Moving regions after resources exist means recreating them, so decide before you apply.
 
-Then:
+Then make sure Terraform's profile is active — **`liftlog-tf`**, not `liftlog`. Using `liftlog` here fails with `AssumeRoleTokenProvider session option not set`; see [3e](#3e-a-third-profile-for-terraform):
 
 ```bash
+export AWS_PROFILE=liftlog-tf
 terraform init
 terraform plan
 ```
+
+`plan` prompts for your MFA code on its first AWS call.
 
 Read the plan. You should see **7 resources to add** and nothing to change or destroy:
 
@@ -333,7 +370,7 @@ aws budgets describe-budgets --account-id "$(terraform output -raw aws_account_i
 ## 7. Commit
 
 ```bash
-cd ~/Documents/liftlog
+cd <your-repo>
 git add -A
 git commit -m "Phase 1: Terraform bootstrap — state backend and budget alarm"
 git push

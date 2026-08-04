@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored —
+# it can contain values you don't want in a public repo.
+
+alert_email = "alexgomez1221@gmail.com"
+
+# Optional overrides:
+# aws_region         = "us-east-1"
+# project            = "liftlog"
+# monthly_budget_usd = 5

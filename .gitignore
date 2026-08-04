@@ -9,3 +9,31 @@ node_modules/
 .env.local
 *.log
 liftlog-backup-*.json
+
+# ---- Terraform ----
+# State can contain secrets and is authoritative — it belongs in S3, not git.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+
+# Real variable values. Commit the .example instead.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored.
+# It pins provider versions and hashes — commit it so CI and your laptop
+# resolve identical providers. Gitignoring it is a common mistake.

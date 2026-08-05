@@ -141,7 +141,30 @@ Worth glancing at after the first real sync from your phone. Duration on a cold 
 
 ## Troubleshooting
 
-**`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the `sub` condition doesn't match. Check `github_repo` in `terraform.tfvars` is exactly `owner/repo`, and that the plan job is running on a pull request rather than a push.
+**`Not authorized to perform sts:AssumeRoleWithWebIdentity`** — the `sub` condition doesn't match what GitHub actually sent.
+
+The trap: **GitHub embeds immutable numeric IDs in the sub claim.** The real value is
+
+```
+repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main
+```
+
+not the `repo:<owner>/<repo>:...` shown in AWS's documentation and essentially every tutorial. Matching the plain form fails with a bare "Not authorized" and no hint as to which condition was rejected — the trust policy can look completely correct while never matching.
+
+The only way to see the claim that was actually presented is the CloudTrail event for the failed call:
+
+CloudTrail → Event history → Event name `AssumeRoleWithWebIdentity` → open a failed event → View event record. `userIdentity.userName` is the sub.
+
+Find your IDs:
+
+```bash
+curl -s https://api.github.com/users/<owner>        | grep '"id"'
+curl -s https://api.github.com/repos/<owner>/<repo> | grep '"id"'
+```
+
+and set `github_owner_id` / `github_repo_id`. Pinning the IDs is stricter than the plain form anyway: renaming the user or repository breaks the trust rather than silently keeping it alive, which is exactly why GitHub added them.
+
+A useful bisection when this happens: set `debug_allow_any_ref = true` to widen the condition to `repo:<claim>:*`. If it still fails, the sub isn't the problem at all and you can stop looking at it — which is how the ID format was eventually found here.
 
 **`Credentials could not be loaded`** — `permissions: id-token: write` is missing from the workflow, or the role ARN variable isn't set in GitHub.
 

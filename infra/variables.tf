@@ -61,3 +61,21 @@ variable "create_oidc_provider" {
   type        = bool
   default     = true
 }
+
+variable "debug_allow_any_ref" {
+  description = "TEMPORARY. Widens the CI roles' sub condition to repo:<owner>/<repo>:* to diagnose an OIDC authorization failure. Set false once resolved."
+  type        = bool
+  default     = false
+}
+
+variable "github_owner_id" {
+  description = "Numeric GitHub account ID — GitHub's OIDC sub claim embeds it. From https://api.github.com/users/<owner>."
+  type        = string
+  default     = "42987339"
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repository ID. From https://api.github.com/repos/<owner>/<repo>."
+  type        = string
+  default     = "1319094575"
+}

@@ -27,6 +27,16 @@ output "issuer" {
   value       = module.auth.issuer
 }
 
+output "api_url" {
+  description = "Sync API endpoint. Phase 4 puts this in the app."
+  value       = module.api.function_url
+}
+
+output "api_log_group" {
+  description = "Tail with: aws logs tail <this> --follow"
+  value       = module.api.log_group
+}
+
 output "login_url" {
   description = "Paste into a browser to test sign-up end to end."
   value       = "${module.auth.hosted_ui_url}/login?client_id=${module.auth.client_id}&response_type=code&scope=email+openid+profile&redirect_uri=${urlencode(var.callback_urls[0])}"

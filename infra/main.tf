@@ -26,3 +26,22 @@ module "auth" {
   callback_urls = var.callback_urls
   logout_urls   = var.logout_urls
 }
+
+module "api" {
+  source = "./modules/api"
+
+  name       = "${local.name}-api"
+  source_dir = "${path.root}/../api"
+
+  table_name = module.data.table_name
+  table_arn  = module.data.table_arn
+
+  cognito_issuer    = module.auth.issuer
+  cognito_client_id = module.auth.client_id
+
+  # CORS origins are the app URLs minus the trailing slash — browsers send
+  # Origin without a path, so "https://x.app/" never matches.
+  allowed_origins = [for u in var.callback_urls : trimsuffix(u, "/")]
+
+  log_retention_days = var.log_retention_days
+}

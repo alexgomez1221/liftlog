@@ -25,6 +25,9 @@ crash.*.log
 *.tfvars.json
 !*.tfvars.example
 
+# Lambda zip built by archive_file — reproducible from api/ source
+infra/modules/api/.build/
+
 override.tf
 override.tf.json
 *_override.tf

@@ -32,6 +32,12 @@ variable "logout_urls" {
   default     = ["http://localhost:8080/"]
 }
 
+variable "log_retention_days" {
+  description = "CloudWatch log retention for the API. Logs default to never expiring, which is the most common source of unexpected cost on small accounts."
+  type        = number
+  default     = 7
+}
+
 variable "deletion_protection" {
   description = "Blocks accidental deletion of the DynamoDB table. Set false if you need `terraform destroy` to succeed."
   type        = bool

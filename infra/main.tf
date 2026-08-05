@@ -1,0 +1,28 @@
+/*
+  Root module.
+
+  Phase 2 wires up the two stateful pieces the API will need in Phase 3:
+  a DynamoDB table for workout data, and a Cognito user pool for identity.
+  Nothing here has a cost floor — both bill per use, with permanent free
+  allowances that comfortably cover single-user traffic.
+*/
+
+locals {
+  name = "${var.project}-${var.env}"
+}
+
+module "data" {
+  source = "./modules/data"
+
+  name                = local.name
+  deletion_protection = var.deletion_protection
+}
+
+module "auth" {
+  source = "./modules/auth"
+
+  name          = local.name
+  project       = var.project
+  callback_urls = var.callback_urls
+  logout_urls   = var.logout_urls
+}

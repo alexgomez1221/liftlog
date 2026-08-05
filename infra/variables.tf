@@ -1,0 +1,39 @@
+variable "aws_region" {
+  description = "Must match the region used in bootstrap. ACM certs for CloudFront also require us-east-1."
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "project" {
+  description = "Name prefix for all resources."
+  type        = string
+  default     = "liftlog"
+}
+
+variable "env" {
+  description = "Environment name. Single environment for now, but naming resources with it avoids a painful rename if a dev stack is ever added."
+  type        = string
+  default     = "prod"
+}
+
+variable "callback_urls" {
+  description = <<-EOT
+    URLs Cognito may redirect to after a successful login. Must match exactly,
+    including trailing slash. Add your deployed app URL here — the localhost
+    entry is only useful if you serve the app locally.
+  EOT
+  type        = list(string)
+  default     = ["http://localhost:8080/"]
+}
+
+variable "logout_urls" {
+  description = "URLs Cognito may redirect to after sign-out. Same exact-match rule as callback_urls."
+  type        = list(string)
+  default     = ["http://localhost:8080/"]
+}
+
+variable "deletion_protection" {
+  description = "Blocks accidental deletion of the DynamoDB table. Set false if you need `terraform destroy` to succeed."
+  type        = bool
+  default     = true
+}

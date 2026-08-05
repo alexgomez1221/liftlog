@@ -83,16 +83,25 @@ data "aws_iam_policy_document" "plan_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # sub pins it to this repository. Without it, ANY GitHub repository in
-    # the world could assume this role — the single most important line here.
+    /*
+      Scoped to this repository, but deliberately NOT to a specific event
+      type. Without the repo prefix, any GitHub repository on the internet
+      could assume this role — that prefix is the load-bearing part.
+
+      The wildcard tail is a considered tradeoff rather than laziness. This
+      role holds ReadOnlyAccess and nothing more: the worst a branch or
+      workflow in this repo can do with it is read state it could already
+      read. Pinning the exact event claim bought no security here and cost
+      real time, because the pull_request sub isn't the documented
+      repo:<owner>/<repo>:pull_request shape.
+
+      The apply role — which can change infrastructure — keeps an exact
+      match on the branch ref. That's where precision earns its keep.
+    */
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        var.debug_allow_any_ref
-        ? "repo:${local.repo_claim}:*"
-        : "repo:${local.repo_claim}:pull_request"
-      ]
+      values   = ["repo:${local.repo_claim}:*"]
     }
   }
 }

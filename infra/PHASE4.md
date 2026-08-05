@@ -17,9 +17,9 @@ git commit -m "Phase 4: cloud sync in the app"
 git push
 ```
 
-Vercel deploys in about a minute. Then **force-close the app on your phone and reopen it twice** — the service worker cache version moved to `liftlog-v6`.
+Vercel deploys in about a minute. Then **force-close the app on your phone and reopen it twice** — the service worker cache version moved to `liftlog-v7`.
 
-Confirm you're on the new build: Settings should read **build 6**.
+Confirm you're on the new build: Settings should read **build 7**.
 
 ---
 
@@ -108,7 +108,7 @@ Worth being explicit, because it's a common and expensive misunderstanding. Sync
 
 **"Sync failed: 403"** — the Lambda function URL's resource policy. See Phase 3.
 
-**Workouts not appearing on the other device** — confirm both are signed in as the same account, and both report build 6. Hit **Sync Now** on both.
+**Workouts not appearing on the other device** — confirm both are signed in as the same account, and both report build 7. Hit **Sync Now** on both.
 
 **Watch the API while testing:**
 
@@ -123,3 +123,34 @@ aws logs tail "$(terraform output -raw api_log_group)" --follow
 Move hosting from Vercel to S3 + CloudFront, so the whole stack lives in AWS.
 
 Note that this changes the origin, which means `localStorage` starts empty at the new URL — but with sync working, signing in restores everything. That's the first real payoff: the migration that would have needed an export/import file now just works.
+
+---
+
+## Fixed in build 7
+
+**`400 item N: updatedAt must be an ISO 8601 timestamp`**
+
+The Phase 3 `curl` test wrote an item whose `data` had no `id`, no `date`, and no embedded `updatedAt` — only the envelope carried one. Syncing pulled that record down, copied the bare `data` into the workouts array, and pushed it back with `updatedAt: undefined`, which the API rejects. `ensureStamped()` ran *before* the pull, so it never saw the new arrival.
+
+Three changes:
+
+1. **The envelope's `updatedAt` is copied onto the record on import.** The envelope is authoritative, so anything written without an embedded timestamp still lands correctly stamped.
+2. **Remote items must carry their identity fields** — `id` for routines/folders/exercises, `id` + `date` for workouts, `date` for body entries. A malformed record would otherwise render as a blank workout that can't be deleted from the UI.
+3. **`localItems()` drops anything with an unparseable timestamp**, and `ensureStamped()` runs again after the pull. A single bad item fails the whole batch, so it's better to skip the offender than block everything else.
+
+### Clearing the test data
+
+The `w_test1` record from Phase 3 is still in DynamoDB. Build 7 ignores it, but to remove it properly:
+
+```bash
+aws dynamodb delete-item \
+  --table-name liftlog-prod \
+  --key '{"PK":{"S":"USER#<your-sub>"},"SK":{"S":"WORKOUT#2026-08-04#w_test1"}}'
+```
+
+Find your `sub` with:
+
+```bash
+aws dynamodb scan --table-name liftlog-prod \
+  --projection-expression "PK,SK" --output table
+```

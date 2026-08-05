@@ -356,7 +356,7 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 6;
+const BUILD = 7;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -2597,7 +2597,11 @@ function localItems(){
   const out = [];
   const push = (kind, obj) => {
     const sk = skFor(kind, obj);
-    if(sk) out.push({sk, type:kind, updatedAt:obj.updatedAt, data:obj});
+    // Defensive: the API rejects a bad timestamp with a 400 that fails the
+    // whole batch, so drop the offender rather than block every other item.
+    if(!sk || sk.includes('undefined')) return;
+    if(typeof obj.updatedAt !== 'string' || Number.isNaN(Date.parse(obj.updatedAt))) return;
+    out.push({sk, type:kind, updatedAt:obj.updatedAt, data:obj});
   };
   if(profile) push('profile', profile);
   workouts.forEach(w => push('workout', w));
@@ -2640,7 +2644,8 @@ function applyRemoteItem(item){
   if(item.sk === 'PROFILE'){
     if(item.deleted) return false;
     if(!profile || !profile.updatedAt || item.updatedAt > profile.updatedAt){
-      profile = item.data; save(LS.profile, profile); return true;
+      profile = Object.assign({}, item.data, {updatedAt: item.updatedAt});
+      save(LS.profile, profile); return true;
     }
     return false;
   }
@@ -2650,6 +2655,21 @@ function applyRemoteItem(item){
   const arr = c.arr();
   const i = arr.findIndex(c.match);
 
+  /* The envelope's updatedAt is authoritative — copy it onto the record.
+     Without this, anything written by a client that didn't embed updatedAt
+     (a curl test, say) comes back unstamped and is then rejected on the
+     next push with "updatedAt must be an ISO 8601 timestamp". */
+  const incoming = Object.assign({}, item.data, {updatedAt: item.updatedAt});
+
+  /* Reject remote records missing the fields that identify them. A
+     malformed item would otherwise render as a blank workout and be
+     impossible to delete from the UI. */
+  const identified =
+    kind === 'BODY' ? typeof incoming.date === 'string'
+    : kind === 'WORKOUT' ? (typeof incoming.id === 'string' && typeof incoming.date === 'string')
+    : typeof incoming.id === 'string';
+  if(!item.deleted && !identified) return false;
+
   if(item.deleted){
     if(i >= 0 && (!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt)){
       arr.splice(i,1); save(c.key, arr); return true;
@@ -2657,9 +2677,9 @@ function applyRemoteItem(item){
     return false;
   }
 
-  if(i < 0){ arr.push(item.data); save(c.key, arr); return true; }
+  if(i < 0){ arr.push(incoming); save(c.key, arr); return true; }
   if(!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt){
-    arr[i] = item.data; save(c.key, arr); return true;
+    arr[i] = incoming; save(c.key, arr); return true;
   }
   return false;
 }
@@ -2682,6 +2702,10 @@ async function cloudSync(opts){
     const res = await cloudFetch('/sync' + (since ? `?since=${encodeURIComponent(since)}` : ''));
     let changed = 0;
     (res.items || []).forEach(it => { if(applyRemoteItem(it)) changed++; });
+
+    // Applying remote items can introduce records the earlier pass never
+    // saw, so stamp again before deciding what to send.
+    ensureStamped();
 
     const outgoing = since ? localItems().filter(i => i.updatedAt > since) : localItems();
     for(let i = 0; i < outgoing.length; i += 400){

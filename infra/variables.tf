@@ -35,7 +35,7 @@ variable "logout_urls" {
 variable "log_retention_days" {
   description = "CloudWatch log retention for the API. Logs default to never expiring, which is the most common source of unexpected cost on small accounts."
   type        = number
-  default     = 7
+  default     = 14
 }
 
 variable "deletion_protection" {

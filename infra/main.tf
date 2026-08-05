@@ -64,4 +64,7 @@ module "cicd" {
   name                 = var.project
   github_repo          = var.github_repo
   create_oidc_provider = var.create_oidc_provider
+  debug_allow_any_ref  = var.debug_allow_any_ref
+  github_owner_id      = var.github_owner_id
+  github_repo_id       = var.github_repo_id
 }

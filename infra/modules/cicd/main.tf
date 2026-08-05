@@ -30,6 +30,28 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 locals {
+  owner = split("/", var.github_repo)[0]
+  name  = split("/", var.github_repo)[1]
+
+  /*
+    GitHub embeds immutable numeric IDs in the OIDC sub claim:
+
+      repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main
+
+    not the plain repo:<owner>/<repo>:... that AWS docs and most tutorials
+    show. Matching the plain form fails with a bare "Not authorized to
+    perform sts:AssumeRoleWithWebIdentity" and no indication why — the only
+    way to see the real claim is the CloudTrail event for the failed call.
+
+    Pinning the IDs is also stricter: renaming the user or repo doesn't
+    silently keep the trust alive, which is precisely why GitHub added them.
+  */
+  repo_claim = (
+    var.github_owner_id != "" && var.github_repo_id != ""
+    ? "${local.owner}@${var.github_owner_id}/${local.name}@${var.github_repo_id}"
+    : var.github_repo
+  )
+
   # Parenthesised so the ternary can wrap without HCL treating the newline
   # as the end of the expression.
   oidc_arn = (
@@ -66,7 +88,11 @@ data "aws_iam_policy_document" "plan_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:pull_request"]
+      values = [
+        var.debug_allow_any_ref
+        ? "repo:${local.repo_claim}:*"
+        : "repo:${local.repo_claim}:pull_request"
+      ]
     }
   }
 }
@@ -107,10 +133,17 @@ data "aws_iam_policy_document" "apply_trust" {
 
     # Exact match on the branch ref, not StringLike. A wildcard here would
     # let a pull request branch assume the apply role.
+    #
+    # debug_allow_any_ref switches to StringLike with a repo-wide wildcard,
+    # purely to bisect an authorization failure. Not a permanent setting.
     condition {
-      test     = "StringEquals"
+      test     = var.debug_allow_any_ref ? "StringLike" : "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/${var.default_branch}"]
+      values = [
+        var.debug_allow_any_ref
+        ? "repo:${local.repo_claim}:*"
+        : "repo:${local.repo_claim}:ref:refs/heads/${var.default_branch}"
+      ]
     }
   }
 }

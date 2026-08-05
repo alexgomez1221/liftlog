@@ -191,6 +191,9 @@ resource "aws_cloudwatch_metric_alarm" "errors" {
   threshold           = 0
   treat_missing_data  = "notBreaching"
 
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+
   dimensions = {
     FunctionName = aws_lambda_function.api.function_name
   }
@@ -206,6 +209,9 @@ resource "aws_cloudwatch_metric_alarm" "throttles" {
   statistic           = "Sum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
+
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
 
   dimensions = {
     FunctionName = aws_lambda_function.api.function_name

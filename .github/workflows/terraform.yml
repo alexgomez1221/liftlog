@@ -1,0 +1,135 @@
+name: Terraform
+
+# Plan on every pull request, apply on merge to main.
+#
+# Authentication is OIDC — GitHub mints a short-lived token per run and AWS
+# exchanges it for temporary credentials. No AWS access keys are stored in
+# this repository, so there is nothing to leak and nothing to rotate.
+
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+      - 'api/**'
+      - '.github/workflows/terraform.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'api/**'
+      - '.github/workflows/terraform.yml'
+  workflow_dispatch:
+
+# Least privilege at the workflow level too. id-token is what allows OIDC;
+# without it the role assumption fails with a confusing credentials error.
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: 'true'
+  # Kept out of the public repo — set as a repository secret.
+  TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+
+# Two applies racing would both try to take the state lock and one would
+# fail. Queue them instead.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.11.0'
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Validate
+        run: terraform validate
+
+      # -lock=false because the plan role is read-only and cannot write the
+      # lock object. Safe here: a plan makes no changes, and the apply that
+      # follows takes a real lock.
+      - name: Plan
+        id: plan
+        run: terraform plan -input=false -no-color -lock=false
+        continue-on-error: true
+
+      - name: Comment plan on PR
+        uses: actions/github-script@v7
+        env:
+          PLAN: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            const plan = (process.env.PLAN || '').slice(0, 60000);
+            const body = `### Terraform plan \`${{ steps.plan.outcome }}\`
+            <details><summary>Show plan</summary>
+
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+
+            </details>`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  apply:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.11.0'
+
+      - name: Init
+        run: terraform init -input=false
+
+      # Plan to a file, then apply exactly that file. Applying a fresh plan
+      # would risk executing something different from what was reviewed.
+      - name: Plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Outputs
+        run: terraform output

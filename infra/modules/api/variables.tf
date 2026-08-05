@@ -38,3 +38,9 @@ variable "log_retention_days" {
   type        = number
   default     = 7
 }
+
+variable "alarm_actions" {
+  description = "SNS topics notified when an alarm fires. An alarm with no actions changes state silently and tells nobody."
+  type        = list(string)
+  default     = []
+}

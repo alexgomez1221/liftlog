@@ -43,3 +43,21 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "github_repo" {
+  description = "owner/repo, used to pin the OIDC sub claim for CI roles."
+  type        = string
+  default     = "alexgomez1221/liftlog"
+}
+
+variable "alert_email" {
+  description = "Where CloudWatch alarms are sent. Supplied in CI as TF_VAR_alert_email so it stays out of the public repo."
+  type        = string
+  default     = ""
+}
+
+variable "create_oidc_provider" {
+  description = "GitHub's OIDC provider is account-wide. Set false if one already exists."
+  type        = bool
+  default     = true
+}

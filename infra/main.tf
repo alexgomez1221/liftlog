@@ -44,4 +44,24 @@ module "api" {
   allowed_origins = [for u in var.callback_urls : trimsuffix(u, "/")]
 
   log_retention_days = var.log_retention_days
+  alarm_actions      = [module.observability.topic_arn]
+}
+
+module "observability" {
+  source = "./modules/observability"
+
+  name          = local.name
+  region        = var.aws_region
+  alert_email   = var.alert_email
+  function_name = "${local.name}-api"
+  table_name    = module.data.table_name
+  log_group     = "/aws/lambda/${local.name}-api"
+}
+
+module "cicd" {
+  source = "./modules/cicd"
+
+  name                 = var.project
+  github_repo          = var.github_repo
+  create_oidc_provider = var.create_oidc_provider
 }

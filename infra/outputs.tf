@@ -41,3 +41,22 @@ output "login_url" {
   description = "Paste into a browser to test sign-up end to end."
   value       = "${module.auth.hosted_ui_url}/login?client_id=${module.auth.client_id}&response_type=code&scope=email+openid+profile&redirect_uri=${urlencode(var.callback_urls[0])}"
 }
+
+output "gha_plan_role_arn" {
+  description = "GitHub variable AWS_PLAN_ROLE_ARN."
+  value       = module.cicd.plan_role_arn
+}
+
+output "gha_apply_role_arn" {
+  description = "GitHub variable AWS_APPLY_ROLE_ARN."
+  value       = module.cicd.apply_role_arn
+}
+
+output "alerts_topic_arn" {
+  value = module.observability.topic_arn
+}
+
+output "dashboard_url" {
+  description = "CloudWatch dashboard."
+  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards/dashboard/${module.observability.dashboard_name}"
+}

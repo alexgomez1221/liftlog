@@ -17,9 +17,9 @@ git commit -m "Phase 4: cloud sync in the app"
 git push
 ```
 
-Vercel deploys in about a minute. Then **force-close the app on your phone and reopen it twice** — the service worker cache version moved to `liftlog-v7`.
+Vercel deploys in about a minute. Then **force-close the app on your phone and reopen it twice** — the service worker cache version moved to `liftlog-v8`.
 
-Confirm you're on the new build: Settings should read **build 7**.
+Confirm you're on the new build: Settings should read **build 8**.
 
 ---
 
@@ -108,7 +108,7 @@ Worth being explicit, because it's a common and expensive misunderstanding. Sync
 
 **"Sync failed: 403"** — the Lambda function URL's resource policy. See Phase 3.
 
-**Workouts not appearing on the other device** — confirm both are signed in as the same account, and both report build 7. Hit **Sync Now** on both.
+**Workouts not appearing on the other device** — confirm both are signed in as the same account, and both report build 8. Hit **Sync Now** on both.
 
 **Watch the API while testing:**
 
@@ -154,3 +154,24 @@ Find your `sub` with:
 aws dynamodb scan --table-name liftlog-prod \
   --projection-expression "PK,SK" --output table
 ```
+
+---
+
+## Fixed in build 8
+
+**Duplicate "Leg Day" entries with an `undefined` date and `NaNs` duration**
+
+The Phase 3 curl item had no `id` in its `data`, so the duplicate check
+`o.id === 'w_test1'` never matched an existing row. Every sync appended
+another copy rather than updating one. On a device that synced three times,
+three phantom workouts.
+
+Build 7 stopped new malformed records being imported. Build 8 removes the
+ones already stored: `pruneInvalid()` runs before the first render and drops
+workouts without an `id` or a parseable `date`, routines/folders/exercises
+without an `id`, and body entries without a `date`. It's idempotent and only
+ever removes rows that can't render anyway.
+
+The general lesson: validating on the way in isn't enough once bad data has
+already landed. A migration that cleans existing state has to ship alongside
+the guard, or every device that synced during the broken window stays broken.

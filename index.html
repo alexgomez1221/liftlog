@@ -356,7 +356,7 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 7;
+const BUILD = 8;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -2557,6 +2557,31 @@ function stamp(obj){
   if(obj && typeof obj === 'object') obj.updatedAt = new Date().toISOString();
   return obj;
 }
+/* One-time cleanup for records that got in before build 7's identity check.
+   A remote item whose data lacked an `id` could never match an existing
+   local row, so every sync appended another copy — showing up as duplicate
+   workouts with an "undefined" date and a NaN duration. Harmless to run
+   repeatedly; it only ever removes rows that can't be rendered anyway. */
+function pruneInvalid(){
+  const str = v => typeof v === 'string' && v.length > 0;
+  const before = [workouts.length, routines.length, folders.length, customEx.length, bodyLog.length];
+
+  workouts = workouts.filter(w => w && str(w.id) && str(w.date) && !Number.isNaN(Date.parse(w.date)));
+  routines = routines.filter(r => r && str(r.id));
+  folders  = folders.filter(f  => f && str(f.id));
+  customEx = customEx.filter(e => e && str(e.id));
+  bodyLog  = bodyLog.filter(b  => b && str(b.date));
+
+  const after = [workouts.length, routines.length, folders.length, customEx.length, bodyLog.length];
+  const removed = before.reduce((a,n,i)=>a+(n-after[i]), 0);
+  if(removed){
+    save(LS.workouts, workouts); save(LS.routines, routines); save(LS.folders, folders);
+    save(LS.customEx, customEx); save(LS.bodyLog, bodyLog);
+    console.warn(`Removed ${removed} malformed record(s)`);
+  }
+  return removed;
+}
+
 function ensureStamped(){
   const now = new Date().toISOString();
   let touched = false;
@@ -2769,6 +2794,10 @@ async function init(){
   // Must run before the first render: returning from the hosted UI, the URL
   // carries ?code= which needs exchanging and stripping.
   const justSignedIn = await handleAuthRedirect().catch(()=>false);
+
+  // Clear anything malformed before the first render, so bad rows never
+  // reach the UI as blank cards that can't be deleted.
+  pruneInvalid();
 
   renderAll();
   registerSW();

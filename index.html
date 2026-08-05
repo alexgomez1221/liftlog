@@ -356,7 +356,7 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 5;
+const BUILD = 6;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -1265,7 +1265,7 @@ function finishSession(){
     if(bestForEx) prList.push({name:exName(e.exId), pr:bestForEx});
   });
 
-  const w = {id:active.id, name:active.name, date, durationSec, routineId:active.routineId, exercises};
+  const w = stamp({id:active.id, name:active.name, date, durationSec, routineId:active.routineId, exercises});
   const existing = workouts.findIndex(x=>x.id===w.id);
   if(existing>=0) workouts[existing]=w; else workouts.push(w);
   workouts.sort((a,b)=> a.date < b.date ? -1 : 1);
@@ -1276,6 +1276,7 @@ function finishSession(){
   el('sessionScreen').classList.remove('on');
   showSummary(w, prList);
   renderAll();
+  if(typeof cloudSync === 'function') cloudSync({quiet:true});
 }
 
 function showSummary(w, prList){
@@ -1445,7 +1446,8 @@ function renderRoutines(){
   wrap.querySelectorAll('[data-rmenu]').forEach(b=>b.onclick=()=>openRoutineMenu(b.dataset.rmenu));
   wrap.querySelectorAll('[data-delfolder]').forEach(b=>b.onclick=()=>{
     if(!confirm('Delete this folder? Routines inside move to Ungrouped.')) return;
-    routines.forEach(r=>{ if(r.folderId===b.dataset.delfolder) r.folderId=null; });
+    routines.forEach(r=>{ if(r.folderId===b.dataset.delfolder){ r.folderId=null; stamp(r); } });
+    tombstone('folder', {id:b.dataset.delfolder});
     folders = folders.filter(f=>f.id!==b.dataset.delfolder);
     save(LS.folders, folders); save(LS.routines, routines); renderRoutines();
   });
@@ -1475,6 +1477,7 @@ function openRoutineMenu(id){
           }));
       } else if(a==='del'){
         if(confirm('Delete "'+r.name+'"?')){
+          tombstone('routine', r);
           routines = routines.filter(x=>x.id!==id); save(LS.routines, routines); renderRoutines();
         }
       }
@@ -1551,6 +1554,7 @@ function openRoutineEditor(existing){
       r.folderId = root.querySelector('#rtFolder').value || null;
       if(!r.name){ toast('Give the routine a name'); return; }
       if(!r.exercises.length){ toast('Add at least one exercise'); return; }
+      stamp(r);
       const i = routines.findIndex(x=>x.id===r.id);
       if(i>=0) routines[i]=r; else routines.push(r);
       save(LS.routines, routines);
@@ -1628,6 +1632,7 @@ function openWorkoutDetail(id){
     };
     root.querySelector('#wdDel').onclick = ()=>{
       if(!confirm('Delete this workout?')) return;
+      tombstone('workout', w);
       workouts = workouts.filter(x=>x.id!==id); save(LS.workouts, workouts);
       closeSheet(); renderAll();
     };
@@ -2014,7 +2019,7 @@ function renderProfile(){
         const d = root.querySelector('#bwDate').value;
         if(!v || !d){ toast('Enter a weight and date'); return; }
         bodyLog = bodyLog.filter(b=>b.date!==d);
-        bodyLog.push({date:d, weight:v});
+        bodyLog.push(stamp({date:d, weight:v}));
         bodyLog.sort((a,b)=>a.date<b.date?-1:1);
         save(LS.bodyLog, bodyLog);
         if(profile){ profile.bodyweight = v; save(LS.profile, profile); }
@@ -2085,8 +2090,8 @@ function openCustomExercise(){
       if(!name){ toast('Enter a name'); return; }
       let id = slug(name);
       if(allEx().some(e=>e.id===id)) id = id+'_'+Math.random().toString(36).slice(2,5);
-      customEx.push({id, name, primary:root.querySelector('#cePrimary').value, secondary:[],
-                     equipment:root.querySelector('#ceEquip').value, type:root.querySelector('#ceType').value, custom:true});
+      customEx.push(stamp({id, name, primary:root.querySelector('#cePrimary').value, secondary:[],
+                     equipment:root.querySelector('#ceEquip').value, type:root.querySelector('#ceType').value, custom:true}));
       save(LS.customEx, customEx);
       closeSheet(); renderExerciseLib(); toast('Exercise created');
     };
@@ -2129,10 +2134,10 @@ function showOnboarding(){
       n.classList.add('on');
     });
     root.querySelector('#obDone').onclick = ()=>{
-      profile = {goal:goal||'general', daysPerWeek:days||3,
+      profile = stamp({goal:goal||'general', daysPerWeek:days||3,
                  units:root.querySelector('#obUnits').value,
                  bodyweight:+root.querySelector('#obBw').value||0,
-                 createdAt:new Date().toISOString()};
+                 createdAt:new Date().toISOString()});
       save(LS.profile, profile);
       if(profile.bodyweight){ bodyLog.push({date:todayISO(), weight:profile.bodyweight}); save(LS.bodyLog, bodyLog); }
       seedStarterRoutines();
@@ -2143,7 +2148,7 @@ function showOnboarding(){
 
 function seedStarterRoutines(){
   if(routines.length) return;
-  const f = {id:uid('f'), name:'My Split'};
+  const f = stamp({id:uid('f'), name:'My Split'});
   folders.push(f);
   const mk = (name, ids, sets) => ({
     id:uid('r'), name, folderId:f.id,
@@ -2153,8 +2158,8 @@ function seedStarterRoutines(){
       return e;
     })
   });
-  routines.push(mk('Upper Day', ['bench_press_barbell','bent_over_row_barbell','overhead_press_dumbbell','lat_pulldown_cable','lateral_raise_dumbbell','bicep_curl_dumbbell','tricep_rope_pushdown'], 3));
-  routines.push(mk('Leg Day', ['squat_barbell','romanian_deadlift_barbell','leg_press','leg_curl_seated','leg_extension','calf_raise_standing'], 3));
+  routines.push(stamp(mk('Upper Day', ['bench_press_barbell','bent_over_row_barbell','overhead_press_dumbbell','lat_pulldown_cable','lateral_raise_dumbbell','bicep_curl_dumbbell','tricep_rope_pushdown'], 3)));
+  routines.push(stamp(mk('Leg Day', ['squat_barbell','romanian_deadlift_barbell','leg_press','leg_curl_seated','leg_extension','calf_raise_standing'], 3)));
   save(LS.folders, folders); save(LS.routines, routines);
 }
 
@@ -2234,8 +2239,17 @@ el('settingsBtn').onclick = ()=>{
       <label class="fl" style="margin-top:12px;">Restore from backup file</label>
       <input type="file" id="stRestore" accept="application/json,.json">
       <button class="btn sec block sm" id="stSnaps" style="margin-top:10px;">↺ Restore Points</button>
-      <div class="dim" style="margin-top:10px;">Your workouts never leave this device. A backup file is the only copy that survives clearing your browser or switching phones — keep it in iCloud Drive or Google Drive.</div>
+      <div class="dim" style="margin-top:10px;">A backup file is the only copy that survives clearing your browser or losing the phone — keep it in iCloud Drive or Google Drive. Cloud sync keeps devices in step; it is not a backup, because it faithfully replicates mistakes too.</div>
     </div>
+
+    <div class="card" style="background:var(--panel2);">
+      <div class="row spread" style="margin-bottom:10px;">
+        <div><b>☁️ Cloud Sync</b><div class="dim" id="stSyncStatus">—</div></div>
+      </div>
+      <div id="stSyncBody"></div>
+      <div class="dim" style="margin-top:10px;">Syncs your workouts across devices through your own AWS account. Everything keeps working offline — changes upload next time you're connected.</div>
+    </div>
+
     <div class="divider"></div>`+`
     <label class="fl">Training goal</label>
     <select id="stGoal" style="margin-bottom:12px;">
@@ -2262,6 +2276,36 @@ el('settingsBtn').onclick = ()=>{
       <span id="stDiag" style="font-size:11px;opacity:.75;"></span>
     </div>
   `, root=>{
+    const syncBody = root.querySelector('#stSyncBody');
+    if(syncBody){
+      const draw = ()=>{
+        renderSyncStatus();
+        if(!cloudConfigured()){
+          syncBody.innerHTML = '<div class="dim">No API endpoint configured in this build.</div>';
+          return;
+        }
+        syncBody.innerHTML = signedIn()
+          ? `<div class="row" style="gap:8px;">
+               <button class="btn sm" style="flex:1;" id="stSyncNow">⟳ Sync Now</button>
+               <button class="btn sec sm" id="stSignOut">Sign Out</button>
+             </div>
+             ${syncMeta.lastError ? `<div class="dim" style="color:var(--bad);margin-top:8px;">${esc(syncMeta.lastError)}</div>` : ''}`
+          : `<button class="btn block sm" id="stSignIn">Sign In to Sync</button>`;
+
+        const si = syncBody.querySelector('#stSignIn');
+        if(si) si.onclick = cloudSignIn;
+        const so = syncBody.querySelector('#stSignOut');
+        if(so) so.onclick = ()=>{ cloudSignOut(); draw(); };
+        const sn = syncBody.querySelector('#stSyncNow');
+        if(sn) sn.onclick = async ()=>{
+          sn.textContent = 'Syncing…'; sn.disabled = true;
+          await cloudSync();
+          sn.disabled = false; draw();
+        };
+      };
+      draw();
+    }
+
     const dg = root.querySelector('#stDiag');
     if(dg){
       const d = layoutDiag();
@@ -2292,11 +2336,11 @@ el('settingsBtn').onclick = ()=>{
       });
     };
     root.querySelector('#stSave').onclick = ()=>{
-      profile = Object.assign({}, profile||{}, {
+      profile = stamp(Object.assign({}, profile||{}, {
         goal: root.querySelector('#stGoal').value,
         units: root.querySelector('#stUnits').value,
         daysPerWeek: +root.querySelector('#stDays').value||3
-      });
+      }));
       save(LS.profile, profile); closeSheet(); renderAll(); toast('Settings saved');
     };
     root.querySelector('#stCsv').onclick = exportCSV;
@@ -2344,12 +2388,343 @@ el('newExerciseBtn').onclick = openCustomExercise;
 el('newFolderBtn').onclick = ()=>{
   const n = prompt('Folder name (e.g. Push Pull Legs)');
   if(!n || !n.trim()) return;
-  folders.push({id:uid('f'), name:n.trim()});
+  folders.push(stamp({id:uid('f'), name:n.trim()}));
   save(LS.folders, folders); renderRoutines();
 };
 
 function renderAll(){
   renderRoutines(); renderBackupBanner(); renderHistory(); renderExerciseLib(); renderProfile();
+}
+
+/* =====================================================================
+   PART 5 — CLOUD SYNC
+
+   Offline-first. localStorage stays the source of truth; the cloud is a
+   replica. Every network call is best-effort — the app must work in a gym
+   basement with no signal, so nothing here ever blocks the UI.
+
+   Conflict resolution is last-write-wins on updatedAt. One person can't be
+   in two gyms at once, so genuine concurrent edits are near-impossible and
+   a CRDT would be complexity for nothing.
+   ===================================================================== */
+
+const CLOUD = {
+  // All three are public by design: the client id and domain end up in the
+  // browser regardless, and the API is authorised by JWT, not by obscurity.
+  api:      "https://mzqyaplq2naklpmhtzh3ch36340kxqgl.lambda-url.us-east-1.on.aws",
+  domain:   "https://liftlog-937485903079.auth.us-east-1.amazoncognito.com",
+  clientId: "55s97g354jr3al3jdsk5a0or6g",
+  scope:    "email openid profile"
+};
+
+const LS_TOKENS = 'll_tokens';
+const LS_TOMB   = 'll_tombstones';
+const LS_SYNC   = 'll_sync';
+
+let tokens     = load(LS_TOKENS, null);
+let tombstones = load(LS_TOMB, []);
+let syncMeta   = load(LS_SYNC, {lastSyncAt:null, lastError:null, lastOkAt:null});
+
+const cloudConfigured = () => /^https?:\/\//.test(CLOUD.api) && !!CLOUD.clientId;
+const signedIn = () => !!(tokens && tokens.refresh_token);
+function redirectUri(){ return location.origin + '/'; }
+
+/* ---------- PKCE ---------- */
+function randomVerifier(){
+  const bytes = new Uint8Array(64);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"[b % 66]).join('');
+}
+function b64urlFromBytes(bytes){
+  let s = '';
+  bytes.forEach(b => s += String.fromCharCode(b));
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+async function challengeFor(verifier){
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return b64urlFromBytes(new Uint8Array(digest));
+}
+
+async function cloudSignIn(){
+  if(!cloudConfigured()){ toast('Cloud sync not configured'); return; }
+  const verifier = randomVerifier();
+  sessionStorage.setItem('ll_pkce', verifier);
+  const challenge = await challengeFor(verifier);
+  const q = new URLSearchParams({
+    client_id: CLOUD.clientId,
+    response_type: 'code',
+    scope: CLOUD.scope,
+    redirect_uri: redirectUri(),
+    code_challenge: challenge,
+    code_challenge_method: 'S256'
+  });
+  location.href = `${CLOUD.domain}/oauth2/authorize?${q}`;
+}
+
+function cloudSignOut(){
+  tokens = null; save(LS_TOKENS, null);
+  syncMeta = {lastSyncAt:null, lastError:null, lastOkAt:null};
+  save(LS_SYNC, syncMeta);
+  toast('Signed out — local data untouched');
+  renderAll();
+}
+
+function storeTokens(t){
+  tokens = {
+    access_token:  t.access_token,
+    id_token:      t.id_token,
+    // A refresh response omits refresh_token; keep the existing one.
+    refresh_token: t.refresh_token || (tokens && tokens.refresh_token),
+    expiresAt:     Date.now() + ((+t.expires_in || 3600) * 1000)
+  };
+  save(LS_TOKENS, tokens);
+}
+
+/* Runs on every load. If the URL carries ?code= we just came back from the
+   hosted UI, so exchange it and strip the query string — leaving a used
+   code in history is untidy and mildly leaky. */
+async function handleAuthRedirect(){
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if(!code) return false;
+
+  const verifier = sessionStorage.getItem('ll_pkce');
+  history.replaceState({}, '', location.pathname);
+  sessionStorage.removeItem('ll_pkce');
+  if(!verifier) return false;
+
+  try{
+    const res = await fetch(`${CLOUD.domain}/oauth2/token`, {
+      method:'POST',
+      headers:{'content-type':'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({
+        grant_type:'authorization_code',
+        client_id: CLOUD.clientId,
+        code,
+        redirect_uri: redirectUri(),
+        code_verifier: verifier
+      })
+    });
+    if(!res.ok) throw new Error('token exchange failed');
+    storeTokens(await res.json());
+    toast('Signed in');
+    return true;
+  }catch(e){
+    toast('Sign-in failed');
+    return false;
+  }
+}
+
+async function accessToken(){
+  if(!tokens) return null;
+  if(tokens.access_token && Date.now() < tokens.expiresAt - 60000) return tokens.access_token;
+  if(!tokens.refresh_token) return null;
+  try{
+    const res = await fetch(`${CLOUD.domain}/oauth2/token`, {
+      method:'POST',
+      headers:{'content-type':'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({
+        grant_type:'refresh_token',
+        client_id: CLOUD.clientId,
+        refresh_token: tokens.refresh_token
+      })
+    });
+    if(!res.ok) throw new Error('refresh failed');
+    storeTokens(await res.json());
+    return tokens.access_token;
+  }catch(e){
+    // Refresh tokens last 30 days; past that the user signs in again.
+    tokens = null; save(LS_TOKENS, null);
+    return null;
+  }
+}
+
+async function cloudFetch(path, options){
+  const tok = await accessToken();
+  if(!tok) throw new Error('not signed in');
+  const res = await fetch(CLOUD.api.replace(/\/+$/,'') + path, Object.assign({}, options, {
+    headers: Object.assign({authorization:`Bearer ${tok}`}, (options && options.headers) || {})
+  }));
+  if(!res.ok){
+    const body = await res.text().catch(()=> '');
+    throw new Error(`${res.status} ${body.slice(0,120)}`);
+  }
+  return res.json();
+}
+
+/* ---------- entity <-> sort key mapping ---------- */
+function stamp(obj){
+  if(obj && typeof obj === 'object') obj.updatedAt = new Date().toISOString();
+  return obj;
+}
+function ensureStamped(){
+  const now = new Date().toISOString();
+  let touched = false;
+  const fix = o => { if(o && !o.updatedAt){ o.updatedAt = now; touched = true; } };
+  if(profile) fix(profile);
+  workouts.forEach(fix); routines.forEach(fix);
+  folders.forEach(fix); customEx.forEach(fix); bodyLog.forEach(fix);
+  if(touched){
+    save(LS.profile,profile); save(LS.workouts,workouts); save(LS.routines,routines);
+    save(LS.folders,folders); save(LS.customEx,customEx); save(LS.bodyLog,bodyLog);
+  }
+}
+
+function skFor(kind, obj){
+  switch(kind){
+    case 'profile':  return 'PROFILE';
+    case 'workout':  return `WORKOUT#${dayOf(obj.date)}#${obj.id}`;
+    case 'routine':  return `ROUTINE#${obj.id}`;
+    case 'folder':   return `FOLDER#${obj.id}`;
+    case 'exercise': return `EXERCISE#${obj.id}`;
+    case 'body':     return `BODY#${obj.date}`;
+  }
+}
+
+function tombstone(kind, obj){
+  const sk = skFor(kind, obj);
+  if(!sk) return;
+  tombstones = tombstones.filter(t => t.sk !== sk);
+  tombstones.push({sk, updatedAt:new Date().toISOString()});
+  // Keep this bounded — a tombstone older than the refresh-token lifetime
+  // can't still be needed by any device that will ever sync again.
+  const cutoff = Date.now() - 90*86400000;
+  tombstones = tombstones.filter(t => Date.parse(t.updatedAt) > cutoff);
+  save(LS_TOMB, tombstones);
+}
+
+function localItems(){
+  const out = [];
+  const push = (kind, obj) => {
+    const sk = skFor(kind, obj);
+    if(sk) out.push({sk, type:kind, updatedAt:obj.updatedAt, data:obj});
+  };
+  if(profile) push('profile', profile);
+  workouts.forEach(w => push('workout', w));
+  routines.forEach(r => push('routine', r));
+  folders.forEach(f => push('folder', f));
+  customEx.forEach(e => push('exercise', e));
+  bodyLog.forEach(b => push('body', b));
+  tombstones.forEach(t => out.push({sk:t.sk, type:'tombstone', updatedAt:t.updatedAt, deleted:true, data:{}}));
+  return out;
+}
+
+function applyRemoteItem(item){
+  const [kind, ...rest] = item.sk.split('#');
+  const id = kind === 'WORKOUT' ? rest[1] : rest[0];
+
+  /* A live remote item and a local tombstone for the same key are in
+     conflict — resolve by timestamp like anything else. Without this, a
+     stale local delete would keep re-killing a record another device has
+     since recreated. */
+  if(!item.deleted){
+    const ti = tombstones.findIndex(t => t.sk === item.sk);
+    if(ti >= 0){
+      if(item.updatedAt > tombstones[ti].updatedAt){
+        tombstones.splice(ti, 1);
+        save(LS_TOMB, tombstones);
+      } else {
+        return false;   // our delete is newer; it stands
+      }
+    }
+  }
+
+  const collections = {
+    ROUTINE:  {arr:()=>routines,  key:LS.routines,  match:o=>o.id===id},
+    FOLDER:   {arr:()=>folders,   key:LS.folders,   match:o=>o.id===id},
+    EXERCISE: {arr:()=>customEx,  key:LS.customEx,  match:o=>o.id===id},
+    WORKOUT:  {arr:()=>workouts,  key:LS.workouts,  match:o=>o.id===id},
+    BODY:     {arr:()=>bodyLog,   key:LS.bodyLog,   match:o=>o.date===id}
+  };
+
+  if(item.sk === 'PROFILE'){
+    if(item.deleted) return false;
+    if(!profile || !profile.updatedAt || item.updatedAt > profile.updatedAt){
+      profile = item.data; save(LS.profile, profile); return true;
+    }
+    return false;
+  }
+
+  const c = collections[kind];
+  if(!c) return false;
+  const arr = c.arr();
+  const i = arr.findIndex(c.match);
+
+  if(item.deleted){
+    if(i >= 0 && (!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt)){
+      arr.splice(i,1); save(c.key, arr); return true;
+    }
+    return false;
+  }
+
+  if(i < 0){ arr.push(item.data); save(c.key, arr); return true; }
+  if(!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt){
+    arr[i] = item.data; save(c.key, arr); return true;
+  }
+  return false;
+}
+
+let syncing = false;
+async function cloudSync(opts){
+  opts = opts || {};
+  if(syncing || !signedIn() || !navigator.onLine) return null;
+  syncing = true;
+  renderSyncStatus();
+  try{
+    ensureStamped();
+    const since = syncMeta.lastSyncAt;
+
+    /* Pull BEFORE push. The reverse order loses data on a first sync: with
+       no lastSyncAt every local item is considered outgoing, so stale local
+       records overwrite newer remote ones, and the subsequent pull just
+       reads back what was clobbered. Pulling first merges by timestamp, so
+       whatever is pushed afterwards is already the winning version. */
+    const res = await cloudFetch('/sync' + (since ? `?since=${encodeURIComponent(since)}` : ''));
+    let changed = 0;
+    (res.items || []).forEach(it => { if(applyRemoteItem(it)) changed++; });
+
+    const outgoing = since ? localItems().filter(i => i.updatedAt > since) : localItems();
+    for(let i = 0; i < outgoing.length; i += 400){
+      await cloudFetch('/sync', {
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({items: outgoing.slice(i, i+400)})
+      });
+    }
+
+    syncMeta = {lastSyncAt: res.serverTime, lastOkAt: new Date().toISOString(), lastError: null};
+    save(LS_SYNC, syncMeta);
+
+    if(changed){ renderAll(); }
+    if(!opts.quiet) toast(changed ? `Synced — ${changed} update${changed>1?'s':''}` : 'Synced');
+    return {pushed: outgoing.length, pulled: changed};
+  }catch(e){
+    syncMeta.lastError = String(e.message || e);
+    save(LS_SYNC, syncMeta);
+    if(!opts.quiet) toast('Sync failed: ' + syncMeta.lastError.slice(0,60));
+    return null;
+  }finally{
+    syncing = false;
+    renderSyncStatus();
+  }
+}
+
+function syncStatusText(){
+  if(!cloudConfigured()) return 'Not configured';
+  if(!signedIn()) return 'Not signed in';
+  if(syncing) return 'Syncing…';
+  if(syncMeta.lastError) return 'Last sync failed';
+  if(syncMeta.lastOkAt){
+    const mins = Math.floor((Date.now() - Date.parse(syncMeta.lastOkAt))/60000);
+    if(mins < 1) return 'Synced just now';
+    if(mins < 60) return `Synced ${mins}m ago`;
+    return `Synced ${Math.floor(mins/60)}h ago`;
+  }
+  return 'Signed in — not synced yet';
+}
+function renderSyncStatus(){
+  const n = document.getElementById('stSyncStatus');
+  if(n) n.textContent = syncStatusText();
 }
 
 /* ---------- service worker + install ---------- */
@@ -2361,11 +2736,16 @@ function registerSW(){
   });
 }
 
-function init(){
+async function init(){
   fitAppHeight();
   ['resize','orientationchange','pageshow'].forEach(ev=>
     window.addEventListener(ev, ()=>setTimeout(fitAppHeight, 60)));
   if(window.visualViewport) window.visualViewport.addEventListener('resize', ()=>setTimeout(fitAppHeight, 60));
+
+  // Must run before the first render: returning from the hosted UI, the URL
+  // carries ?code= which needs exchanging and stripping.
+  const justSignedIn = await handleAuthRedirect().catch(()=>false);
+
   renderAll();
   registerSW();
   requestPersistence();
@@ -2373,6 +2753,14 @@ function init(){
   else if(active){ openSession(); }
   // snapshot on load so there's always a rollback point from the last session
   if(workouts.length) takeSnapshot('app opened');
+
+  // Opportunistic and non-blocking. Quiet on load so a failed sync in a gym
+  // with no signal doesn't nag; explicit "Sync Now" reports either way.
+  if(signedIn()) cloudSync({quiet: !justSignedIn});
+  window.addEventListener('online', ()=>cloudSync({quiet:true}));
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible') cloudSync({quiet:true});
+  });
 }
 init();
 

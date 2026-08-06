@@ -1,0 +1,31 @@
+# Gitleaks findings that have been reviewed and accepted.
+#
+# Format: {commit}:{file}:{rule-id}:{start-line}
+#
+# Entries here are permanent exemptions and each one needs a reason. An
+# unexplained line in this file is indistinguishable from someone silencing a
+# real leak, which is the failure mode the scanner exists to prevent.
+#
+# ---------------------------------------------------------------------------
+#
+# Both entries below are the SAME two IAM access key IDs, ending …MKND7 and
+# …PQOUR. They were exposed in screenshots, rotated immediately, and are dead.
+# They appear in the repository only because the security documentation
+# records the incident — see finding L-7 in docs/SECURITY.md.
+#
+# The working tree no longer contains them; the IDs are truncated to their
+# last four characters in the current SECURITY.md, so nothing going forward
+# will match. These two entries cover the history, which gitleaks scans
+# because the job checks out with fetch-depth: 0.
+#
+# Note what is NOT being exempted: only the access key IDs. No secret access
+# key has ever been committed to this repository, and history has been audited
+# for tfstate, tfvars and key material. An access key ID alone is a username,
+# not a credential.
+#
+# Rewriting history to excise these was considered and rejected — force-pushing
+# a public repository to remove two dead identifiers is a worse trade than two
+# documented exemptions.
+
+75e47b1c93bcbe12562ea284f750cf6ef259c141:docs/SECURITY-WIP.md:aws-access-token:130
+1599df81870d79ddaa1c58e17c23475dbf407717:docs/SECURITY.md:aws-access-token:510

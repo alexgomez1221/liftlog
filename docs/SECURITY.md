@@ -507,9 +507,17 @@ cross-account trust probing. Recorded for completeness rather than action.
 
 ### L-7 · Two AWS access keys were exposed in screenshots — process finding
 
-`AKIA5URUDUTT4M5MKND7` and `AKIA5URUDUTTRW6PQOUR` were exposed in screenshots
-and have been rotated. Both are dead, and the repository history is clean —
-no `tfstate`, no `tfvars`, no key material.
+Two IAM access keys — ending `…MKND7` and `…PQOUR` — were exposed in
+screenshots and have been rotated. Both are dead, and the repository history
+is clean of key *material*: no `tfstate`, no `tfvars`, no secret access keys.
+
+The IDs are deliberately truncated here. Written in full they match
+`AKIA[0-9A-Z]{16}`, which is what both gitleaks and Trivy detect on — and
+they did, on the first CI run, from this very paragraph. A scanner cannot
+know a key is rotated, and it should not have to: the correct response to
+"our secret scanner flagged our own security doc" is to stop writing
+credentials into documentation, not to teach the scanner to ignore them. The
+last four characters are enough to identify which keys these were.
 
 The finding is not the keys but the absence of a control that would have
 caught them. GitHub push protection is free on public repositories and would
@@ -632,6 +640,32 @@ preserving when adding more:
 Kind 3 is the one to watch. A suppression that points at an open finding is
 honest bookkeeping; a suppression that points at nothing is a finding that
 has been deleted rather than fixed.
+
+### Division of labour between scanners
+
+The first CI run settled a question worth recording: **Checkov owns Terraform,
+Trivy does not.**
+
+Trivy was initially configured with `scanners: vuln,secret,misconfig`. Its
+misconfiguration pass produced four HIGH findings and every one was a decision
+Checkov had already been told about — `AWS-0132` twice for SSE-S3 rather than a
+CMK (`CKV_AWS_145`), `AWS-0345` for `s3:*` in the apply role (`CKV_AWS_356`,
+the H-1 residual), and `AWS-0136` for the SNS managed key. Trivy does not read
+`#checkov:skip` comments, so silencing them would have meant a second
+suppression file, in a second rule vocabulary, describing the same decisions —
+guaranteed to drift out of step with the inline comments.
+
+One finding was also wrong on its own terms. `AWS-0132` fired on the S3 access
+log destination bucket, while the rule's own description states that "SSE-KMS
+is not supported for S3 server access logging destination buckets; in such
+cases, use SSE-S3 instead" — which is exactly what that bucket does.
+
+`misconfig` is therefore disabled. Trivy runs `vuln,secret`, which is ground
+Checkov does not cover at all. Two scanners that disagree are worth having;
+two that repeat each other into an unmaintained ignore file are not.
+
+Worth noting what this cost: nothing. Trivy reported zero vulnerabilities and
+zero secrets on that same run.
 
 Two limits worth stating plainly:
 

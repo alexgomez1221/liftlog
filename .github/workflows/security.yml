@@ -84,9 +84,30 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # vuln,secret only — misconfig is deliberately NOT enabled.
+      #
+      # Checkov owns Terraform here. Running Trivy's misconfig scanner too
+      # meant the same decisions were reported twice under two rule
+      # vocabularies, and Trivy does not read Checkov's inline
+      # `#checkov:skip` comments — so silencing it would mean a second,
+      # parallel suppression file that drifts out of step with the first.
+      # The first CI run produced exactly four misconfig findings, all four
+      # already documented Checkov suppressions (AWS-0132 x2 = CKV_AWS_145,
+      # AWS-0345 = CKV_AWS_356, AWS-0136 = the SNS managed-key decision).
+      #
+      # One of them was wrong on its own terms: AWS-0132 fired on the S3
+      # access-log destination bucket, while the rule's own text says
+      # "SSE-KMS is not supported for S3 server access logging destination
+      # buckets; in such cases, use SSE-S3 instead" — which is what that
+      # bucket does.
+      #
+      # Two scanners disagreeing is useful. Two scanners repeating each other
+      # into a suppression file nobody maintains is not.
+      #
       # The handler has no npm dependencies — the AWS SDK v3 ships with the
-      # nodejs20.x runtime — so today this is mostly a config and secret
-      # sweep. It starts earning its keep the moment a package.json appears.
+      # nodejs20.x runtime — so what remains is a dependency and secret
+      # sweep. It starts earning its keep the moment a package.json appears,
+      # and it covers ground Checkov does not touch at all.
       #
       # v-prefixed tag, and not by accident. trivy-action was the subject of a
       # supply chain attack; as part of the response the maintainers migrated
@@ -98,7 +119,7 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: vuln,secret,misconfig
+          scanners: vuln,secret
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
@@ -122,7 +143,7 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: vuln,secret,misconfig
+          scanners: vuln,secret
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: table

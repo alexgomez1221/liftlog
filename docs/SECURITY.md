@@ -5,8 +5,8 @@ optional cloud sync.
 
 | | |
 |---|---|
-| Assessed | 2026-08-05 |
-| Revision | `test-ci` @ `75e47b1` plus uncommitted working-tree changes |
+| Assessed | 2026-08-05, remediation through 2026-08-06 |
+| Revision | `main` @ `1599df8` plus the M-2 / L-1 remediation |
 | Method | Manual review of application, infrastructure and pipeline source, plus Checkov 3.3.9 against `infra/` |
 | Reviewed | `api/index.mjs`, `infra/**/*.tf`, `index.html` (cloud sync layer), `sw.js`, `vercel.json`, `.github/workflows/terraform.yml` |
 
@@ -283,9 +283,40 @@ token sits in `localStorage` with a 30-day lifetime. Any script execution on
 offers no defence — it is origin-scoped, unencrypted, and readable by any
 script on the origin.
 
-The app is a single HTML file with inline `<script>`, so a script-src policy
-needs `'unsafe-inline'` or a build step to hash the block. That weakens
-script-src specifically but leaves the rest of a policy fully effective:
+**Fixed.** `vercel.json` now sets a policy on `/(.*)`, plus
+`X-Content-Type-Options`, `Referrer-Policy: no-referrer`, a
+`Permissions-Policy` denying unused features, and
+`Cross-Origin-Opener-Policy`. The app references exactly two external origins
+and loads nothing from a CDN, so `connect-src` names literal hosts rather than
+wildcards.
+
+**Be clear about what this does and does not buy.** The app is a single HTML
+file with one inline `<script>`, so `script-src` needs `'unsafe-inline'`.
+That allowance also permits inline event handlers — which means **this CSP
+does not block the L-1 injection vector**. An injected `onmouseover=` would
+still execute. The control for L-1 is output escaping, which is why L-1 was
+fixed in the same change rather than treated as covered by this one.
+
+What the policy does buy:
+
+- `connect-src` bounds where a successful injection can exfiltrate to: your
+  own origin, Cognito, and the Lambda URL. Stolen tokens cannot be POSTed to
+  an attacker's collector.
+- `base-uri 'none'` and `object-src 'none'` close two standard routes for
+  escalating a minor injection into script execution.
+- `frame-ancestors 'none'` prevents clickjacking.
+- `Referrer-Policy: no-referrer` stops the OAuth `?code=` in the landing URL
+  leaking via the `Referer` header on any request that fires before
+  `history.replaceState` strips it.
+
+The upgrade path is a hashed or nonced `script-src`, which would remove
+`'unsafe-inline'` and make the policy a genuine XSS control. A nonce needs
+per-request server rendering, which static Vercel hosting cannot do; a
+`sha256-` hash is static but must be regenerated on every edit to
+`index.html`, so it needs a build step to be safe. Neither is worth it until
+the single-file property is given up for another reason.
+
+For reference, the shape that was applied:
 
 ```jsonc
 {
@@ -420,8 +451,28 @@ Low. It is worth fixing anyway, because it is the ingredient M-2 needs to
 become an account takeover, and because "attacker already has a token" is
 exactly the position a stolen 30-day refresh token puts them in.
 
-**Remediation:** wrap these in `esc()`. Optionally validate ID shape
-server-side in `handlePost`.
+**Fixed.** Ten interpolations now pass through `esc()`. Auditing the fix
+turned up one site the original finding missed: `class="setbtn ${s.type}"`
+(line 1013). Set type is not an id, but it comes off the wire the same way —
+the sync import at line 896 does `type: s.type || 'normal'` with no allowlist,
+despite `SET_TYPES` being a fixed four-key map. Two `value=` attributes
+carrying user-entered numbers (`reps`, body weight) were escaped for the same
+reason: nothing guarantees they are still numbers after a round trip through
+an opaque `data` blob.
+
+Deliberately *not* escaped: interpolations of `MUSCLES`, `EQUIPMENT`, `GOALS`,
+`SET_TYPES` and loop indices, which are module constants with no path from the
+network. `ssColor` was checked and is a lookup into the `SS_COLORS` constant,
+so it is safe despite appearing in a `style` attribute.
+
+`const BUILD` and the service worker `CACHE_VERSION` were bumped to 9 so
+installed PWAs actually pick the fix up.
+
+**Still open, as defence in depth:** `handlePost` stores `data` as an opaque
+blob with no schema validation (`api/index.mjs:215`). Server-side shape
+validation would mean a malformed record could not be stored at all, rather
+than being stored and then escaped on the way out. Not required now that
+output escaping is correct, but it is the belt to this fix's braces.
 
 ### L-2 · OAuth authorize request omits the `state` parameter
 
@@ -580,11 +631,11 @@ project and each would need revisiting if that changed.
 | H-1 | High | Escalation path fixed, pending apply · residual breadth accepted |
 | H-2 | High | Fixed — defaults committed, pending apply |
 | M-1 | Medium | Open — folds into Phase 5 |
-| M-2 | Medium | Open |
+| M-2 | Medium | Fixed — CSP + security headers in vercel.json |
 | M-3 | Medium | Open |
 | M-4 | Medium | Open |
 | M-5 | Medium | Open — folds into Phase 5 |
-| L-1 | Low | Open |
+| L-1 | Low | Fixed — 10 interpolations escaped, build 9 |
 | L-2 | Low | Open |
 | L-3 | Low | Open |
 | L-4 | Low | Open |
@@ -593,14 +644,22 @@ project and each would need revisiting if that changed.
 | L-7 | Low | Keys rotated; push protection still to enable |
 | L-8 | Low | Open |
 
-Nothing High remains open. Suggested order for the rest: enable secret
-scanning and push protection first — it is two checkboxes in repository
-settings and is the control that was missing when L-7 happened. Then M-2,
-which is a single `vercel.json` block and materially reduces what L-1 and a
-stolen refresh token can do between them. Then M-4, which is a two-line
-Terraform change plus enrolling an authenticator. M-3 next. M-1 and M-5
-resolve together whenever Phase 5 happens; there is no reason to build a
-CloudFront distribution solely for them.
+Nothing High remains open, and M-2 and L-1 are closed. Suggested order for
+the rest:
+
+1. **M-4** — a two-line Terraform change plus enrolling an authenticator.
+   Single-factor auth is now the weakest remaining link in the chain that
+   protects the data.
+2. **L-3** — delete `debug_allow_any_ref`. One variable stands between a pull
+   request branch and the apply role.
+3. **M-3** — replace the plan role's account-wide `ReadOnlyAccess` with a
+   policy scoped to what `terraform plan` actually reads.
+4. **L-4, L-5, L-8** — small correctness fixes, batchable.
+5. **L-2** — add OAuth `state`. Currently redundant with PKCE, but only by
+   coincidence.
+
+M-1 and M-5 resolve together whenever Phase 5 happens; there is no reason to
+build a CloudFront distribution solely for them.
 
 ## 6a. Automated scan results
 

@@ -1,0 +1,206 @@
+name: Security
+
+# Static analysis. Five independent checks, each in its own job so one
+# failure doesn't hide the others:
+#
+#   checkov     Terraform misconfiguration
+#   trivy       filesystem and dependency scan
+#   gitleaks    secrets in history and on push
+#   codeql      JavaScript in api/
+#   pin-check   fail if any action is unpinned or its tag has moved
+#
+# Findings upload to the Security tab as SARIF where the tool supports it,
+# so results are reviewable rather than buried in log output.
+#
+# Suppressions belong inline, next to the code, with a reason. A blanket
+# skip list at the top of this file is how a scanner quietly stops working.
+# See docs/SECURITY.md for the assessment these checks enforce.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly. New CVEs land against unchanged code, so a scan that only runs
+    # on push goes stale the moment development pauses.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Terraform misconfiguration
+  # ---------------------------------------------------------------------
+  checkov:
+    name: Checkov (terraform)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # skip_check is deliberately empty. The one finding we expect and
+      # accept — CKV_AWS_119, DynamoDB not using a customer-managed KMS key —
+      # is suppressed inline in infra/modules/data/main.tf with its rationale.
+      #
+      # If the first run surfaces others, triage each one into either a fix
+      # or an inline `#checkov:skip=<ID>:<reason>` comment. Do not add them
+      # here.
+      - uses: bridgecrewio/checkov-action@9b70310bcd306d11740313070b940167d6b23085 # master
+        with:
+          directory: infra
+          framework: terraform
+          quiet: true
+          soft_fail: false
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        # Uploading SARIF needs security-events: write, which a Dependabot
+        # PR's read-only token does not have. Scan still runs and still gates
+        # the build; only the Security-tab upload is skipped.
+        if: (success() || failure()) && github.actor != 'dependabot[bot]'
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+  # ---------------------------------------------------------------------
+  # Filesystem / dependency scan
+  # ---------------------------------------------------------------------
+  trivy:
+    name: Trivy (filesystem)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The handler has no npm dependencies — the AWS SDK v3 ships with the
+      # nodejs20.x runtime — so today this is mostly a config and secret
+      # sweep. It starts earning its keep the moment a package.json appears.
+      #
+      # v-prefixed tag, and not by accident. trivy-action was the subject of a
+      # supply chain attack; as part of the response the maintainers migrated
+      # every tag to a `v` prefix and removed the old unprefixed ones. The
+      # bare `0.28.0` this workflow originally referenced no longer resolves,
+      # which is precisely the failure mode a mutable tag invites — and the
+      # reason every entry in this file is pinned to a SHA below.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy.sarif
+          # Report and upload, then gate in a separate step so the SARIF
+          # still reaches the Security tab when findings exist.
+          exit-code: '0'
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        # Uploading SARIF needs security-events: write, which a Dependabot
+        # PR's read-only token does not have. Scan still runs and still gates
+        # the build; only the Security-tab upload is skipped.
+        if: (success() || failure()) && github.actor != 'dependabot[bot]'
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+      - name: Fail on HIGH or CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+
+  # ---------------------------------------------------------------------
+  # Secrets
+  # ---------------------------------------------------------------------
+  gitleaks:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so history is scanned, not just the tip. Two AWS
+      # access keys have already been exposed on this project (via
+      # screenshots, not commits) — see L-7 in docs/SECURITY.md.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # Free for public repositories and personal accounts. Moving this repo
+      # into a GitHub organisation would require a GITLEAKS_LICENSE secret.
+      #
+      # This is detection after the fact. The control that actually prevents
+      # a leak is GitHub push protection — Settings → Code security → Secret
+      # scanning. Enable both; they are not substitutes for each other.
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------
+  # JavaScript
+  # ---------------------------------------------------------------------
+  codeql:
+    name: CodeQL (javascript)
+    # CodeQL always publishes its results, so it cannot run without
+    # security-events: write — which Dependabot PRs do not get. Skipped rather
+    # than left to fail. Dependabot only edits action pins in
+    # .github/workflows, so there is no JavaScript change for it to analyse.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # NOTE: CodeQL extracts .js/.mjs files. The app's JavaScript lives in
+      # an inline <script> block in index.html and is NOT analysed here —
+      # which is exactly where finding L-1 (unescaped IDs in HTML
+      # attributes) lives. Treat this job as covering api/ only. Extracting
+      # the app script to its own .js file would bring it in scope, at the
+      # cost of the single-file property the PWA is built around.
+      - uses: github/codeql-action/init@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        with:
+          category: /language:javascript-typescript
+
+  # ---------------------------------------------------------------------
+  # Supply chain: action pinning
+  # ---------------------------------------------------------------------
+  pin-check:
+    name: Actions pinned to SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # A mutable tag like @v4 means whoever controls that repo can change
+      # what runs in CI. The apply job in terraform.yml holds write access to
+      # this account's infrastructure, so an action it trusts is an action
+      # that can reach AWS.
+      #
+      # GITHUB_TOKEN raises the anonymous API rate limit, which the script
+      # will otherwise hit resolving several actions per file.
+      - name: Check pins
+        run: ./scripts/pin-actions.sh --check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

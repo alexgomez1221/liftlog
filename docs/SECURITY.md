@@ -628,8 +628,8 @@ project and each would need revisiting if that changed.
 
 | ID | Severity | Status |
 |---|---|---|
-| H-1 | High | Escalation path fixed, pending apply · residual breadth accepted |
-| H-2 | High | Fixed — defaults committed, pending apply |
+| H-1 | High | **Fixed & applied** · residual breadth accepted and suppressed |
+| H-2 | High | **Fixed & applied** — CI and local plans now identical |
 | M-1 | Medium | Open — folds into Phase 5 |
 | M-2 | Medium | Fixed — CSP + security headers in vercel.json |
 | M-3 | Medium | Open |

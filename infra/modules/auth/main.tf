@@ -40,9 +40,23 @@ resource "aws_cognito_user_pool" "main" {
   }
 
   admin_create_user_config {
-    # Self-service sign-up. Lock this to true if the pool should ever be
-    # invite-only.
-    allow_admin_create_user_only = false
+    /*
+      Self-signup is CLOSED by default.
+
+      An open pool lets anyone on the internet register. They can't read your
+      data — every partition key is derived from their own `sub` — but they
+      can store their own records in your table, consume your free tier, and
+      give an attacker a legitimate token with which to probe the API.
+
+      This is a single-user app, so there is no reason for registration to be
+      open. Create additional users with:
+
+        aws cognito-idp admin-create-user \
+          --user-pool-id <id> --username <email>
+
+      Set allow_signup = true if the app ever becomes multi-tenant.
+    */
+    allow_admin_create_user_only = !var.allow_signup
   }
 
   # Cognito sends verification mail from a shared AWS address, capped at 50

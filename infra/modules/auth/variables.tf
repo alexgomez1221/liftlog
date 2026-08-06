@@ -17,3 +17,9 @@ variable "logout_urls" {
   description = "Exact URLs Cognito may redirect to after logout."
   type        = list(string)
 }
+
+variable "allow_signup" {
+  description = "Whether anyone can self-register in the pool. False means invite-only via admin-create-user — correct for a single-user app."
+  type        = bool
+  default     = false
+}

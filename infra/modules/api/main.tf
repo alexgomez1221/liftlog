@@ -92,6 +92,21 @@ resource "aws_lambda_function" "api" {
   memory_size = 512
   timeout     = 15
 
+  /*
+    Caps how many copies can run at once. An unauthenticated request still
+    invokes the function before the handler returns 401, so a public URL is
+    an invocation-cost surface as much as a data surface.
+
+    This bounds the rate rather than the total — a determined attacker can
+    still generate volume, which is what the $5 budget alarm is for. Real
+    rate limiting means CloudFront with WAF in front, worth it only if this
+    ever stops being a personal app.
+
+    It also stops a runaway from consuming the account's whole concurrency
+    pool, which matters more once there's a second function.
+  */
+  reserved_concurrent_executions = var.reserved_concurrency
+
   environment {
     variables = {
       TABLE_NAME         = var.table_name

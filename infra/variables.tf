@@ -79,3 +79,15 @@ variable "github_repo_id" {
   type        = string
   default     = "1319094575"
 }
+
+variable "allow_signup" {
+  description = "Allow self-registration in the Cognito pool. False = invite-only, correct for a single-user app."
+  type        = bool
+  default     = false
+}
+
+variable "reserved_concurrency" {
+  description = "Lambda max concurrent executions. Bounds cost exposure from unauthenticated traffic."
+  type        = number
+  default     = 5
+}

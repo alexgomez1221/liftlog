@@ -44,3 +44,9 @@ variable "alarm_actions" {
   type        = list(string)
   default     = []
 }
+
+variable "reserved_concurrency" {
+  description = "Max concurrent executions. Bounds blast radius from an unauthenticated flood. -1 means unreserved."
+  type        = number
+  default     = 5
+}

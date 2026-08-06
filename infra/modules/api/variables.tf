@@ -44,3 +44,9 @@ variable "alarm_actions" {
   type        = list(string)
   default     = []
 }
+
+variable "reserved_concurrency" {
+  description = "Max concurrent executions. Bounds blast radius from an unauthenticated flood. -1 means unreserved, which is the only value AWS accepts while the account's total concurrency quota is 10. See the root variable of the same name."
+  type        = number
+  default     = -1
+}

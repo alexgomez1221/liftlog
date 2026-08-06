@@ -8,6 +8,14 @@
 
 resource "aws_sns_topic" "alerts" {
   name = "${var.name}-alerts"
+
+  # Encrypt messages at rest with the AWS-managed SNS key. Unlike the
+  # DynamoDB case — where a CMK would cost $1/month for no gain — alias/aws/sns
+  # is free to use and only incurs fractions of a cent in KMS request
+  # charges at alarm volume. Alarm notifications name resources and describe
+  # failure conditions, which is mild reconnaissance value at worst, but the
+  # fix costs nothing so there is no tradeoff to weigh.
+  kms_master_key_id = "alias/aws/sns"
 }
 
 # Email subscriptions require confirming a link. Terraform creates the

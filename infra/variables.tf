@@ -19,17 +19,26 @@ variable "env" {
 variable "callback_urls" {
   description = <<-EOT
     URLs Cognito may redirect to after a successful login. Must match exactly,
-    including trailing slash. Add your deployed app URL here — the localhost
-    entry is only useful if you serve the app locally.
+    including trailing slash. The localhost entry is only useful if you serve
+    the app locally.
+
+    The real value is committed as the default deliberately. These are public
+    identifiers, not secrets — they are visible in the hosted UI redirect and
+    in any browser's network tab. Previously the default was localhost-only
+    and the real value lived only in gitignored terraform.tfvars, which meant
+    CI ran with different inputs than a laptop: the apply job on merge to main
+    silently rewrote the Cognito client's callback URLs to localhost and broke
+    sign-in in production. Committing the value keeps CI and local plans
+    identical. If this ever moves off Vercel, change it here.
   EOT
   type        = list(string)
-  default     = ["http://localhost:8080/"]
+  default     = ["https://liftlog-rust.vercel.app/", "http://localhost:8080/"]
 }
 
 variable "logout_urls" {
-  description = "URLs Cognito may redirect to after sign-out. Same exact-match rule as callback_urls."
+  description = "URLs Cognito may redirect to after sign-out. Same exact-match rule as callback_urls, and committed as a default for the same reason."
   type        = list(string)
-  default     = ["http://localhost:8080/"]
+  default     = ["https://liftlog-rust.vercel.app/", "http://localhost:8080/"]
 }
 
 variable "log_retention_days" {
@@ -78,4 +87,42 @@ variable "github_repo_id" {
   description = "Numeric GitHub repository ID. From https://api.github.com/repos/<owner>/<repo>."
   type        = string
   default     = "1319094575"
+}
+
+variable "allow_signup" {
+  description = "Allow self-registration in the Cognito pool. False = invite-only, correct for a single-user app."
+  type        = bool
+  default     = false
+}
+
+variable "reserved_concurrency" {
+  description = <<-EOT
+    Lambda max concurrent executions. Bounds cost exposure from
+    unauthenticated traffic. -1 means no reservation.
+
+    Defaults to -1 because reserving concurrency is impossible on an account
+    whose total Lambda concurrency quota is 10 — AWS refuses any reservation
+    that would drop unreserved concurrency below 10, so on a default new
+    account no positive value is accepted:
+
+      InvalidParameterValueException: Specified ReservedConcurrentExecutions
+      for function decreases account's UnreservedConcurrentExecution below
+      its minimum value of [10]
+
+    This is less of a loss than it looks. With one function in the account,
+    the account-wide quota IS the cap — a flood is bounded at 10 concurrent
+    executions either way. What the reservation adds is a guarantee that one
+    runaway function cannot starve another, which only matters once there is
+    a second function.
+
+    To enable it: raise the Lambda "Concurrent executions" quota
+    (L-B99A9384) to 100 or more, then set this to 5. Check the current value
+    with:
+
+      aws lambda get-account-settings --query 'AccountLimit.ConcurrentExecutions'
+
+    See docs/SECURITY.md finding M-5.
+  EOT
+  type        = number
+  default     = -1
 }

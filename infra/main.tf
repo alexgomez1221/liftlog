@@ -25,6 +25,7 @@ module "auth" {
   project       = var.project
   callback_urls = var.callback_urls
   logout_urls   = var.logout_urls
+  allow_signup  = var.allow_signup
 }
 
 module "api" {
@@ -43,8 +44,9 @@ module "api" {
   # Origin without a path, so "https://x.app/" never matches.
   allowed_origins = [for u in var.callback_urls : trimsuffix(u, "/")]
 
-  log_retention_days = var.log_retention_days
-  alarm_actions      = [module.observability.topic_arn]
+  log_retention_days   = var.log_retention_days
+  alarm_actions        = [module.observability.topic_arn]
+  reserved_concurrency = var.reserved_concurrency
 }
 
 module "observability" {

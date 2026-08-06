@@ -23,6 +23,8 @@ data "archive_file" "lambda" {
 # quietly accrues cost forever and is the most common surprise line item
 # on small AWS accounts.
 resource "aws_cloudwatch_log_group" "lambda" {
+  #checkov:skip=CKV_AWS_158:CloudWatch encrypts log data at rest by default. A CMK would add KMS charges and key management to protect handler logs that deliberately contain no tokens, no request bodies and no user data — 5xx paths log an error object, 4xx paths log nothing. Same reasoning as the DynamoDB key decision.
+  #checkov:skip=CKV_AWS_338:The one-year retention this check wants is a compliance-retention requirement, not a security control, and it inverts the intent here. Retention is 7 days deliberately: never-expiring logs are the most common surprise cost on a small account, and there is no audit obligation on a personal project. See infra/modules/api/variables.tf.
   name              = "/aws/lambda/${var.name}"
   retention_in_days = var.log_retention_days
 }
@@ -77,6 +79,11 @@ resource "aws_iam_role_policy" "lambda" {
 }
 
 resource "aws_lambda_function" "api" {
+  #checkov:skip=CKV_AWS_116:A dead letter queue only catches ASYNCHRONOUS invocation failures. This function is invoked synchronously through a function URL, so a failure returns an HTTP status to the caller who retries — there is no async event to lose. The errors alarm below is the control that actually applies here.
+  #checkov:skip=CKV_AWS_117:Putting this function in a VPC would isolate it from the public internet — but it must reach Cognito's JWKS endpoint to verify tokens, which from a private subnet requires a NAT gateway at roughly $32/month, more than the entire rest of the stack. It holds no VPC-resident dependency: DynamoDB is reached over the AWS network via IAM. VPC placement would add cost and a failure mode while protecting nothing.
+  #checkov:skip=CKV_AWS_173:The environment variables are TABLE_NAME, COGNITO_ISSUER, COGNITO_CLIENT_ID and NODE_OPTIONS. All four are public identifiers — the issuer and client id are visible in every browser's network tab by design. There is no secret here to encrypt; a CMK would cost $1/month to protect published values.
+  #checkov:skip=CKV_AWS_272:Code signing requires an AWS Signer profile and a signing step in the pipeline. The integrity control that matters more for this threat model is pinning GitHub Actions to commit SHAs (scripts/pin-actions.sh), since a compromised action is the realistic path to modified code reaching Lambda. Revisit if this stops being a single-maintainer project.
+  #checkov:skip=CKV_AWS_50:X-Ray tracing is an observability feature, not a security control. Metrics, alarms and a dashboard already cover this function, and traces would add cost for a single-consumer API.
   function_name = var.name
   role          = aws_iam_role.lambda.arn
 
@@ -91,6 +98,21 @@ resource "aws_lambda_function" "api" {
   # sooner often costs the same or less than less memory running longer.
   memory_size = 512
   timeout     = 15
+
+  /*
+    Caps how many copies can run at once. An unauthenticated request still
+    invokes the function before the handler returns 401, so a public URL is
+    an invocation-cost surface as much as a data surface.
+
+    This bounds the rate rather than the total — a determined attacker can
+    still generate volume, which is what the $5 budget alarm is for. Real
+    rate limiting means CloudFront with WAF in front, worth it only if this
+    ever stops being a personal app.
+
+    It also stops a runaway from consuming the account's whole concurrency
+    pool, which matters more once there's a second function.
+  */
+  reserved_concurrent_executions = var.reserved_concurrency
 
   environment {
     variables = {
@@ -124,6 +146,7 @@ resource "aws_lambda_function" "api" {
   reachable, and authorization is the Cognito JWT the handler verifies.
 */
 resource "aws_lambda_permission" "function_url" {
+  #checkov:skip=CKV_AWS_301:Correctly identified and deliberate — this endpoint is meant to be publicly reachable, and authorization is the Cognito JWT the handler verifies before any data path. Tracked as an open finding (M-1) in docs/SECURITY.md rather than dismissed; the remediation is CloudFront with OAC, which arrives with Phase 5. Remove this suppression then.
   statement_id           = "AllowPublicFunctionUrlInvoke"
   action                 = "lambda:InvokeFunctionUrl"
   function_name          = aws_lambda_function.api.function_name
@@ -149,6 +172,7 @@ resource "aws_lambda_permission" "function_url" {
   stops being a personal project.
 */
 resource "aws_lambda_permission" "function_invoke" {
+  #checkov:skip=CKV_AWS_301:Required for function URLs created after October 2025; without it every request 403s. Broader than the URL grant because it is not scoped by auth type — this is the exact concern recorded as M-1 in docs/SECURITY.md, open, with CloudFront + OAC as the remediation in Phase 5. Suppressed because it is triaged, not because it is fine.
   statement_id  = "AllowPublicFunctionInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.api.function_name
@@ -157,6 +181,7 @@ resource "aws_lambda_permission" "function_invoke" {
 
 
 resource "aws_lambda_function_url" "api" {
+  #checkov:skip=CKV_AWS_258:AWS_IAM here would require the browser to hold AWS credentials and sign with SigV4, which a public single-page app cannot do safely — so NONE is the only workable value, not an oversight. The consequence, that unauthenticated requests are billed invocations before the handler returns 401, is tracked as M-5 in docs/SECURITY.md and bounded by reserved concurrency and the budget alarm.
   function_name = aws_lambda_function.api.function_name
 
   # The JWT is the authorization. AWS_IAM here would require the browser to

@@ -16,6 +16,7 @@
 */
 
 resource "aws_dynamodb_table" "main" {
+  # checkov:skip=CKV_AWS_119:AWS-owned key is deliberate. DynamoDB always encrypts at rest; a CMK costs ~$1/month and adds key management for no meaningful gain on a single-tenant table only this account's Lambda can read. Revisit if the data ever becomes multi-tenant or regulated. See docs/SECURITY.md, Accepted risks.
   name = var.name
 
   # On-demand: no provisioned capacity, therefore no idle cost. Provisioned

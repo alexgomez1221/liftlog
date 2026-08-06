@@ -1,12 +1,20 @@
 # Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+#
+# alert_email is the only value you MUST set here. Everything else has a
+# working default in variables.tf.
+#
+# Do NOT put callback_urls or logout_urls here unless you are deploying to a
+# different URL than the committed default. CI has no access to this file, so
+# anything set only here makes local plans disagree with CI plans — which is
+# exactly how the Cognito callback URLs got silently reverted to localhost on
+# a merge to main. Change the default in variables.tf instead.
 
-# Where Cognito may redirect after login. Must match EXACTLY, trailing slash
-# included. Add your deployed app URL once you know it, e.g.
-#   callback_urls = ["https://liftlog.vercel.app/", "http://localhost:8080/"]
-callback_urls = ["http://localhost:8080/"]
-logout_urls   = ["http://localhost:8080/"]
+# Where CloudWatch alarms are sent. Set as the ALERT_EMAIL repo secret in CI.
+alert_email = "you@example.com"
 
 # Optional overrides:
+# callback_urls       = ["https://your-app.example/", "http://localhost:8080/"]
+# logout_urls         = ["https://your-app.example/", "http://localhost:8080/"]
 # aws_region          = "us-east-1"
 # project             = "liftlog"
 # env                 = "prod"

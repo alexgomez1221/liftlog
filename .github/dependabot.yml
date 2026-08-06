@@ -1,0 +1,38 @@
+version: 2
+
+# Keeps the pinned action SHAs current.
+#
+# Pinning to a commit SHA buys immutability and costs currency: the pin is
+# frozen, so a security fix released upstream never reaches you. That tradeoff
+# is only acceptable if something is updating the pins. scripts/pin-actions.sh
+# stops actions drifting UNPINNED; this stops them drifting OUTDATED. Neither
+# is sufficient alone.
+#
+# Dependabot rewrites the SHA and preserves the trailing "# v4" tag comment,
+# which is the same shape pin-actions.sh writes, so the two do not fight.
+
+updates:
+  - package-ecosystem: github-actions
+    # "/" means the workflow files in .github/workflows, not the repo root.
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '07:00'
+      timezone: America/Los_Angeles
+
+    # One PR for all action bumps rather than one per action. With 12 pinned
+    # actions across two workflows, ungrouped updates would be a steady drip
+    # of near-identical PRs, and a review queue nobody reads is worse than no
+    # review queue.
+    groups:
+      actions:
+        patterns:
+          - '*'
+
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - security
+    commit-message:
+      prefix: 'chore(actions)'

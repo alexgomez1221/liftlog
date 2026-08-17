@@ -108,10 +108,18 @@ Deliberately avoided: NAT Gateway (~$32/mo), RDS/Aurora (~$15+/mo), ALB (~$16/mo
 │   │   └── cicd/           OIDC provider, CI roles
 │   └── PHASE*.md           build runbooks
 ├── docs/
+│   ├── SECURITY.md         assessment, threat model, findings
+│   ├── SECURITY-NEXT.md    backlog + decisions not to regress
 │   ├── DECISIONS.md        architecture decision records
 │   └── DEPLOY-VERCEL.md    original static-hosting guide
-└── .github/workflows/
-    └── terraform.yml       plan on PR, apply on main
+├── scripts/
+│   └── pin-actions.sh      pin GitHub Actions to commit SHAs
+├── CLAUDE.md               conventions, for humans and agents alike
+└── .github/
+    ├── dependabot.yml      weekly grouped action bumps
+    └── workflows/
+        ├── terraform.yml   plan on PR, apply on main
+        └── security.yml    checkov, trivy, gitleaks, codeql, pin-check
 ```
 
 ---
@@ -175,3 +183,26 @@ The JWT and tenant-isolation suites run against the actual handler with a genera
 ## Decisions
 
 [`docs/DECISIONS.md`](docs/DECISIONS.md) records the architecture choices and their tradeoffs, plus the six bugs that changed the design — including a data-loss bug in the sync ordering that tests caught before it reached real workouts, and an undocumented GitHub OIDC claim format that took four eliminated hypotheses to find.
+
+---
+
+## Security
+
+[`docs/SECURITY.md`](docs/SECURITY.md) is the assessment: assets, trust
+boundaries, threat model, and every finding with its severity, reasoning and
+resolution. Notable entries include a CI role that was account-administrator
+through `iam:*`, a deployment pipeline that silently reverted the Cognito
+callback URLs and broke production sign-in, and a "sign out" that cleared local
+tokens without ending the Cognito session — which made MFA impossible to test
+and produced convincing evidence it was broken.
+
+The write-ups keep the wrong turns rather than only the fixes, because the
+failure modes generalise further than the patches do.
+
+[`docs/SECURITY-NEXT.md`](docs/SECURITY-NEXT.md) carries what's left, the
+recovery procedure for an MFA lockout, and a list of decisions that look like
+oversights and are not. Read it before changing anything security-adjacent.
+
+Static analysis runs on every push and weekly: Checkov, Trivy, gitleaks, CodeQL
+and an action-pinning gate. Suppressions live inline on the resource with a
+written reason — never in a skip list.

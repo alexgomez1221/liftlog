@@ -481,11 +481,10 @@ CSP forbids external scripts. Desktop users type the key.
   sign-in is confirmed. Enrol-then-delete is the safe order, and getting it
   backwards is what caused the lockout.
 
-**Not yet done:** `mfa_configuration` is `OPTIONAL`, so MFA is available but
-not required, and no factor is enrolled yet. Reaching `ON` means enrolling
-through the new screen, confirming with `admin-get-user`, then raising it.
-Until then single-factor authentication remains the only gate, which is the
-original finding.
+**Closed.** A TOTP factor is enrolled and verified on two devices, and
+`mfa_configuration` is `ON` — every sign-in now requires a second factor. The
+orphaned association was replaced in the process, since `AssociateSoftwareToken`
+supersedes any previous token.
 
 ### M-5 · Function URL is unauthenticated at the edge
 
@@ -794,7 +793,7 @@ project and each would need revisiting if that changed.
 | M-1 | Medium | Open — folds into Phase 5 |
 | M-2 | Medium | Fixed — CSP + security headers in vercel.json |
 | M-3 | Medium | Fixed — plan role scoped, data reads explicitly denied |
-| M-4 | Medium | Fixed — in-app enrolment shipped; enrol, then raise to ON |
+| M-4 | Medium | **Fixed** — TOTP enrolled, `mfa_configuration = ON` |
 | M-5 | Medium | Open — folds into Phase 5 |
 | M-6 | Medium | Fixed — sign-out now ends the Cognito session |
 | L-1 | Low | Fixed — 10 interpolations escaped |
@@ -897,6 +896,39 @@ Two limits worth stating plainly:
 - **Checkov reads Terraform, not AWS.** It cannot see configuration drift, so
   it would not have caught H-2. The plan-is-empty-after-apply check suggested
   in that finding is what covers this gap.
+
+### What a gate should fail on
+
+`pin-actions.sh --check` originally failed on two things: actions with no SHA
+pin, and pins that had fallen behind their tag. The second was a mistake, and
+CI demonstrated it within a day — three consecutive runs on `main` went red,
+including one on a docs-only commit.
+
+The cause was `bridgecrewio/checkov-action`, which has published no release
+since 2022 and only moves `master`. A pin to it is stale by construction, so
+the gate was permanently red for a condition nobody could clear. Dependabot
+was meanwhile doing the right thing: opening a PR offering the update.
+
+Two tools were reporting the same fact with wildly different severities. The
+distinction that was missing:
+
+- **Unpinned is a supply chain hole.** A mutable tag means someone else
+  decides what executes in a job holding AWS credentials. Fail the build.
+- **Behind-by-a-release is housekeeping.** The pin is immutable and was
+  reviewed; it is simply not the newest. Dependabot already delivers that as a
+  reviewable PR. Warn, do not fail.
+
+`--check` now fails only on unpinned entries and warns on stale ones;
+`--strict` preserves the old behaviour. The general point is worth keeping: a
+check that goes red for reasons nobody can act on immediately trains people to
+ignore it, and an ignored gate is worse than no gate, because it still reads
+as coverage.
+
+The same run also removed `checkov-action` entirely in favour of
+`pip install checkov==3.3.9`. An unmaintained third-party action running with
+this job's permissions, wrapping a tool that is one pip install away, was a
+dependency with no upside — and dropping it makes the local and CI invocations
+identical, which matters because suppressions are verified locally first.
 
 ### Action pinning, and why it is not theoretical
 

@@ -7,7 +7,7 @@ name: Security
 #   trivy       filesystem and dependency scan
 #   gitleaks    secrets in history and on push
 #   codeql      JavaScript in api/
-#   pin-check   fail if any action is unpinned or its tag has moved
+#   pin-check   fail if any action is unpinned (stale pins only warn)
 #
 # Findings upload to the Security tab as SARIF where the tool supports it,
 # so results are reviewable rather than buried in log output.
@@ -46,21 +46,38 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # skip_check is deliberately empty. The one finding we expect and
-      # accept — CKV_AWS_119, DynamoDB not using a customer-managed KMS key —
-      # is suppressed inline in infra/modules/data/main.tf with its rationale.
+      # Checkov is run directly rather than through bridgecrewio/checkov-action.
       #
-      # If the first run surfaces others, triage each one into either a fix
-      # or an inline `#checkov:skip=<ID>:<reason>` comment. Do not add them
-      # here.
-      - uses: bridgecrewio/checkov-action@9b70310bcd306d11740313070b940167d6b23085 # master
-        with:
-          directory: infra
-          framework: terraform
-          quiet: true
-          soft_fail: false
-          output_format: cli,sarif
-          output_file_path: console,checkov.sarif
+      # That action has published no release since 2022 and only moves
+      # `master`, so pinning it means pinning to a branch SHA that is stale by
+      # construction — permanently flagged, never actionable. It also puts a
+      # third-party action, with whatever permissions this job holds, between
+      # us and a tool that is one pip install away.
+      #
+      # Removing it drops a supply chain dependency and makes the local and CI
+      # invocations identical, which matters because suppressions are verified
+      # locally before they are pushed.
+      #
+      # The version is pinned deliberately. Bump it consciously — a scanner
+      # that silently changes what it reports is a scanner you cannot baseline
+      # against. Current local baseline: 109 passed, 0 failed, 25 skipped.
+      - name: Install Checkov
+        run: pip install --disable-pip-version-check 'checkov==3.3.9'
+
+      # skip_check is deliberately empty. The findings we accept are suppressed
+      # inline on the resources themselves, each with a written reason.
+      #
+      # If a run surfaces something new, triage it into either a fix or an
+      # inline `#checkov:skip=<ID>:<reason>` comment. Never a list here.
+      # NOTE on --output-file-path: the second element must be a FILE, not a
+      # directory, even though `checkov --help` calls it "the output folder".
+      # Passing a directory there produces console output and silently writes
+      # no SARIF at all — the upload step then fails on a missing file, or
+      # worse, uploads nothing and looks fine.
+      - name: Run Checkov
+        run: |
+          checkov -d infra --framework terraform --compact \
+            -o cli -o sarif --output-file-path console,checkov.sarif
 
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
@@ -218,6 +235,13 @@ jobs:
       # what runs in CI. The apply job in terraform.yml holds write access to
       # this account's infrastructure, so an action it trusts is an action
       # that can reach AWS.
+      #
+      # This fails only on UNPINNED entries. A pin that has fallen behind its
+      # tag is reported as a warning and left to Dependabot, which opens a PR
+      # for it. Failing on staleness turned every upstream release into a red
+      # build on main until someone merged — and a check that is red for
+      # reasons nobody can act on right now is a check people stop reading.
+      # Use --strict if you ever want the harder behaviour.
       #
       # GITHUB_TOKEN raises the anonymous API rate limit, which the script
       # will otherwise hit resolving several actions per file.

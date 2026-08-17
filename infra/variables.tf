@@ -130,7 +130,7 @@ variable "mfa_configuration" {
     TOTP only. SMS is the weaker factor and costs per message.
   EOT
   type        = string
-  default     = "OPTIONAL"
+  default     = "ON"
 }
 
 variable "reserved_concurrency" {

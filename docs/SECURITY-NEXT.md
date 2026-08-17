@@ -6,32 +6,14 @@ every finding ID below — is in [`SECURITY.md`](SECURITY.md). This file is just
 the queue.
 
 **Status: all findings closed except M-1 and M-5 (both deferred to Phase 5)
-and L-6 (accepted).** One follow-up action remains: enrol MFA and raise
-`mfa_configuration` to `ON`. See `SECURITY.md` §8 for authoritative status.
+and L-6 (accepted).** MFA is enrolled and required. See `SECURITY.md` §8 for
+authoritative status.
 
 ---
 
 ## Queue
 
-One follow-up action, then everything actionable is done.
-
-### Follow-up · Enrol MFA, then set `mfa_configuration = "ON"`
-
-The in-app enrolment flow now exists (Settings → Two-factor authentication),
-and `mfa_configuration` is `OPTIONAL` — MFA is available but not required, and
-no factor is enrolled yet.
-
-1. Apply the Terraform change (adds the scope, sets OPTIONAL) and deploy the app.
-2. **Sign out and back in.** Existing tokens predate the new scope; the setup
-   screen will tell you so if you skip this.
-3. Settings → Two-factor authentication → Set up authenticator.
-4. Confirm: `admin-get-user ... --query UserMFASettingList` should return
-   `["SOFTWARE_TOKEN_MFA"]`.
-5. Only then set `mfa_configuration = "ON"` and apply.
-
-**Keep the old authenticator entry until sign-in is confirmed working.**
-Enrol-then-delete is the safe order. Deleting first is what caused the
-lockout.
+Nothing actionable outstanding. What follows is reference material for when something goes wrong.
 
 ### If you are locked out of Cognito
 
@@ -112,9 +94,19 @@ drifts. One of those findings also contradicted its own rule text.
 add a `skip_check` list to the workflow.
 
 **Actions are pinned to commit SHAs.** `scripts/pin-actions.sh --check` gates
-it in CI and Dependabot keeps the pins current. Note that `trivy-action` must
-use `v`-prefixed tags — the unprefixed ones were removed after a supply chain
-attack.
+it in CI and Dependabot keeps the pins current. Two things not to change back:
+`--check` fails only on UNPINNED entries and merely warns on stale ones —
+failing on staleness made every upstream release a red build on main, which is
+how a gate gets ignored (`--strict` if you ever want it). And `trivy-action`
+must use `v`-prefixed tags; the unprefixed ones were removed after a supply
+chain attack.
+
+**Checkov runs via `pip install checkov==3.3.9`, not `checkov-action`.** That
+action has had no release since 2022 and only moves `master`. Running the tool
+directly drops an unmaintained dependency and keeps the CI and local
+invocations identical. Note that `--output-file-path console,<path>` needs a
+FILE, not a directory, despite what `--help` says — passing a directory writes
+no SARIF and fails silently.
 
 **The CSP includes `script-src 'unsafe-inline'`**, which is unavoidable while
 the app is a single file with an inline `<script>`. It therefore does *not*

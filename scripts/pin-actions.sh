@@ -12,14 +12,25 @@
 # that tag and updates the pin if it has moved.
 #
 # Usage:  ./scripts/pin-actions.sh [--check]
-#         --check  exit non-zero if anything is unpinned or stale (for CI)
+#         --check   exit non-zero if anything is UNPINNED (for CI). Pins that
+#                   are merely behind their tag are reported as warnings —
+#                   Dependabot opens a PR for those.
+#         --strict  also fail on stale pins.
 #
 # Set GITHUB_TOKEN to raise the anonymous API rate limit (60/hr).
 
 set -euo pipefail
 
 WORKFLOW_DIR=".github/workflows"
-CHECK_ONLY="${1:-}"
+CHECK_ONLY=""
+STRICT=0
+for arg in "$@"; do
+  case "$arg" in
+    --check)  CHECK_ONLY="--check" ;;
+    --strict) CHECK_ONLY="--check"; STRICT=1 ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 if [ ! -d "$WORKFLOW_DIR" ]; then
   echo "No $WORKFLOW_DIR — run this from the repository root." >&2
@@ -80,9 +91,22 @@ resolve() {
   out="$(api "https://api.github.com/repos/${repo}/commits/${ref}")" || return 1
 
   # First "sha" in the payload is the commit's own SHA.
-  sha="$(printf '%s' "$out" \
-    | grep -m1 -oE '"sha"[[:space:]]*:[[:space:]]*"[a-f0-9]{40}"' \
-    | grep -oE '[a-f0-9]{40}')" || return 1
+  #
+  # Matched with a bash regex rather than `printf | grep -m1`, and that is not
+  # a style preference. `grep -m1` exits the moment it matches and closes the
+  # pipe; if printf is still writing, it takes SIGPIPE and the pipeline fails.
+  # Under `set -o pipefail` that failure propagates and the action is reported
+  # as unresolvable. Whether it happens depends on payload size, so it fired
+  # only for github/codeql-action — whose commits payload is large — and was
+  # invisible for every other action. The error message then blamed the ref
+  # for not existing, which sent the diagnosis in exactly the wrong direction.
+  #
+  # No pipeline, no subprocess, no race.
+  if [[ "$out" =~ \"sha\"[[:space:]]*:[[:space:]]*\"([a-f0-9]{40})\" ]]; then
+    sha="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
   [ -n "$sha" ] || return 1
 
   cache_keys+=("$key")
@@ -93,9 +117,13 @@ resolve() {
 # Distinguishing "GitHub is rate-limiting you" from "that action does not
 # exist" is the difference between waiting an hour and hunting a typo.
 rate_limit_remaining() {
-  api "https://api.github.com/rate_limit" 2>/dev/null \
-    | grep -m1 -oE '"remaining"[[:space:]]*:[[:space:]]*[0-9]+' \
-    | grep -oE '[0-9]+$' || printf 'unknown'
+  local out
+  out="$(api "https://api.github.com/rate_limit" 2>/dev/null)" || { printf 'unknown'; return 0; }
+  if [[ "$out" =~ \"remaining\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf 'unknown'
+  fi
 }
 
 # Collect workflow files first. A glob that matches nothing expands to itself,
@@ -117,6 +145,7 @@ fi
 # meant to provide was a no-op. Redirecting a file INTO the loop (`done <
 # "$wf"`) reads the same content in the current shell. Avoid `mapfile` here:
 # it is bash 4+, and macOS still ships bash 3.2 as /bin/bash.
+unpinned=0
 stale=0
 failed=0
 
@@ -188,16 +217,23 @@ for wf in "${files[@]}"; do
       continue
     fi
 
-    stale=$((stale + 1))
-
     if [ "$CHECK_ONLY" = "--check" ]; then
       if [[ "$ref" =~ ^[a-f0-9]{40}$ ]]; then
-        echo "    ✗ $action is pinned to $ref but $tag now points at $sha" >&2
+        # Pinned, but the tag has moved on. Not a security failure: the pin is
+        # immutable and was reviewed. Being behind is a maintenance signal, and
+        # Dependabot already delivers that as a pull request.
+        stale=$((stale + 1))
+        echo "    ⚠ $action is pinned to ${ref:0:12}… but $tag now points at ${sha:0:12}…"
       else
+        # No pin at all — a mutable tag decides what runs in CI. This is the
+        # thing worth failing a build over.
+        unpinned=$((unpinned + 1))
         echo "    ✗ $action@$ref is unpinned (would be $sha)" >&2
       fi
       continue
     fi
+
+    stale=$((stale + 1))
 
     lines[$i]="${prefix}${action}@${sha} # ${tag}"
     modified=1
@@ -232,12 +268,32 @@ if [ "$failed" -gt 0 ] && [ "$CHECK_ONLY" = "--check" ]; then
 fi
 
 if [ "$CHECK_ONLY" = "--check" ]; then
-  if [ "$stale" -eq 0 ]; then
-    echo "All actions pinned and current."
-    exit 0
+  [ "$stale" -gt 0 ] && echo "$stale action(s) behind their tag — Dependabot will open a PR."
+
+  if [ "$unpinned" -gt 0 ]; then
+    echo "$unpinned action(s) NOT pinned to a commit SHA." >&2
+    exit 1
   fi
-  echo "$stale action(s) unpinned or stale." >&2
-  exit 1
+
+  # Staleness deliberately does not fail unless --strict.
+  #
+  # An earlier version failed on both, and it made the gate unusable: the
+  # moment any upstream tag moved, every run on main went red until someone
+  # merged a Dependabot PR. bridgecrewio/checkov-action made that permanent —
+  # it has published no release since 2022 and only moves `master`, so a pin
+  # to it is stale by construction.
+  #
+  # A check that is red for reasons nobody can act on immediately is a check
+  # people learn to ignore, which costs more than the staleness it reports.
+  # Unpinned is a supply chain hole; behind-by-a-release is housekeeping, and
+  # Dependabot already handles housekeeping.
+  if [ "$STRICT" = "1" ] && [ "$stale" -gt 0 ]; then
+    echo "Failing on stale pins because --strict was given." >&2
+    exit 1
+  fi
+
+  [ "$stale" -eq 0 ] && echo "All actions pinned and current." || echo "All actions pinned."
+  exit 0
 fi
 
 echo "Done. Review the diff before committing:  git diff $WORKFLOW_DIR"

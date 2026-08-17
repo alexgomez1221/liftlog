@@ -40,3 +40,6 @@ tfplan
 # NOTE: .terraform.lock.hcl is deliberately NOT ignored.
 # It pins provider versions and hashes — commit it so CI and your laptop
 # resolve identical providers. Gitignoring it is a common mistake.
+
+# Scanner output, produced by a local checkov run
+*.sarif

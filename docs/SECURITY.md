@@ -5,14 +5,14 @@ optional cloud sync.
 
 | | |
 |---|---|
-| Assessed | 2026-08-05, remediation through 2026-08-06 |
-| Revision | `main` @ `f22bf42` plus the M-3 / M-4 / L-2 / L-3 / L-4 / L-5 / L-8 remediation |
+| Assessed | 2026-08-05; remediation complete 2026-08-17 |
+| Revision | `main` @ `b608dd1` — all findings remediated except M-1/M-5 (Phase 5) and L-6 (accepted) |
 | Method | Manual review of application, infrastructure and pipeline source, plus Checkov 3.3.9 against `infra/` |
-| Reviewed | `api/index.mjs`, `infra/**/*.tf`, `index.html` (cloud sync layer), `sw.js`, `vercel.json`, `.github/workflows/terraform.yml` |
+| Reviewed | `api/index.mjs`, `infra/**/*.tf`, `index.html` (cloud sync + MFA), `sw.js`, `vercel.json`, both workflows, `scripts/pin-actions.sh` |
 
 Not covered: no dynamic testing, no dependency audit (there are no runtime
-npm dependencies), no review of the Vercel account or GitHub org
-configuration itself, no review of `infra/bootstrap`.
+npm dependencies), no review of the Vercel account or GitHub organisation
+configuration itself.
 
 ---
 

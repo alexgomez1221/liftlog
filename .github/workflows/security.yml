@@ -44,7 +44,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # skip_check is deliberately empty. The one finding we expect and
       # accept — CKV_AWS_119, DynamoDB not using a customer-managed KMS key —
@@ -53,7 +53,7 @@ jobs:
       # If the first run surfaces others, triage each one into either a fix
       # or an inline `#checkov:skip=<ID>:<reason>` comment. Do not add them
       # here.
-      - uses: bridgecrewio/checkov-action@9b70310bcd306d11740313070b940167d6b23085 # master
+      - uses: bridgecrewio/checkov-action@1246d92f57abae29d5db5f9aeeed2a9813e52d7d # master
         with:
           directory: infra
           framework: terraform
@@ -63,7 +63,7 @@ jobs:
           output_file_path: console,checkov.sarif
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         # Uploading SARIF needs security-events: write, which a Dependabot
         # PR's read-only token does not have. Scan still runs and still gates
         # the build; only the Security-tab upload is skipped.
@@ -82,7 +82,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # vuln,secret only — misconfig is deliberately NOT enabled.
       #
@@ -129,7 +129,7 @@ jobs:
           exit-code: '0'
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         # Uploading SARIF needs security-events: write, which a Dependabot
         # PR's read-only token does not have. Scan still runs and still gates
         # the build; only the Security-tab upload is skipped.
@@ -159,7 +159,7 @@ jobs:
       # fetch-depth: 0 so history is scanned, not just the tip. Two AWS
       # access keys have already been exposed on this project (via
       # screenshots, not commits) — see L-7 in docs/SECURITY.md.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -169,7 +169,7 @@ jobs:
       # This is detection after the fact. The control that actually prevents
       # a leak is GitHub push protection — Settings → Code security → Secret
       # scanning. Enable both; they are not substitutes for each other.
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -188,7 +188,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # NOTE: CodeQL extracts .js/.mjs files. The app's JavaScript lives in
       # an inline <script> block in index.html and is NOT analysed here —
@@ -196,12 +196,12 @@ jobs:
       # attributes) lives. Treat this job as covering api/ only. Extracting
       # the app script to its own .js file would bring it in scope, at the
       # cost of the single-file property the PWA is built around.
-      - uses: github/codeql-action/init@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         with:
           languages: javascript-typescript
           queries: security-extended
 
-      - uses: github/codeql-action/analyze@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         with:
           category: /language:javascript-typescript
 
@@ -212,7 +212,7 @@ jobs:
     name: Actions pinned to SHAs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # A mutable tag like @v4 means whoever controls that repo can change
       # what runs in CI. The apply job in terraform.yml holds write access to

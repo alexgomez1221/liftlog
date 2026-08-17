@@ -23,9 +23,10 @@ module "auth" {
 
   name          = local.name
   project       = var.project
-  callback_urls = var.callback_urls
-  logout_urls   = var.logout_urls
-  allow_signup  = var.allow_signup
+  callback_urls     = var.callback_urls
+  logout_urls       = var.logout_urls
+  allow_signup      = var.allow_signup
+  mfa_configuration = var.mfa_configuration
 }
 
 module "api" {
@@ -66,7 +67,6 @@ module "cicd" {
   name                 = var.project
   github_repo          = var.github_repo
   create_oidc_provider = var.create_oidc_provider
-  debug_allow_any_ref  = var.debug_allow_any_ref
   github_owner_id      = var.github_owner_id
   github_repo_id       = var.github_repo_id
 }

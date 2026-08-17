@@ -164,7 +164,15 @@ curl -s https://api.github.com/repos/<owner>/<repo> | grep '"id"'
 
 and set `github_owner_id` / `github_repo_id`. Pinning the IDs is stricter than the plain form anyway: renaming the user or repository breaks the trust rather than silently keeping it alive, which is exactly why GitHub added them.
 
-A useful bisection when this happens: set `debug_allow_any_ref = true` to widen the condition to `repo:<claim>:*`. If it still fails, the sub isn't the problem at all and you can stop looking at it — which is how the ID format was eventually found here.
+A useful bisection when this happens: widen the condition to `repo:<claim>:*` temporarily. If it still fails, the sub isn't the problem at all and you can stop looking at it — which is how the ID format was eventually found here.
+
+> **Historical note.** This used to be a `debug_allow_any_ref` variable. It was
+> removed (finding L-3) — leaving a one-flag path from "opens a pull request"
+> to "holds the apply role" in the tree wasn't worth the convenience, and the
+> failure it existed to diagnose is long fixed. If you need this again, read
+> the real `sub` claim from the CloudTrail event for the failed
+> `AssumeRoleWithWebIdentity` call instead of widening the trust policy to
+> find it.
 
 **`Credentials could not be loaded`** — `permissions: id-token: write` is missing from the workflow, or the role ARN variable isn't set in GitHub.
 

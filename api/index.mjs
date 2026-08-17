@@ -25,16 +25,28 @@ const CLIENT_ID = process.env.COGNITO_CLIENT_ID;
 
 const ddb = new DynamoDBClient({});
 
-/* Sort-key prefixes the client is allowed to write. Anything else is
-   rejected — this stops a caller inventing item types we don't expect. */
+/* Sort keys the client is allowed to write. Anything else is rejected — this
+   stops a caller inventing item types we don't expect.
+
+   Split into exact matches and prefixes deliberately. The previous check was
+   `sk === p || sk.startsWith(p)` against a single list, which meant "PROFILE"
+   — the one entry with no trailing "#" — also admitted PROFILE_anything and
+   PROFILEX. A prefix without a delimiter is not a namespace. */
+const ALLOWED_SK_EXACT = ["PROFILE"];
+
 const ALLOWED_SK_PREFIXES = [
-  "PROFILE",
   "WORKOUT#",
   "ROUTINE#",
   "FOLDER#",
   "EXERCISE#",
   "BODY#",
 ];
+
+function isAllowedSk(sk) {
+  if (ALLOWED_SK_EXACT.includes(sk)) return true;
+  /* Require something after the delimiter: "WORKOUT#" alone is not an item. */
+  return ALLOWED_SK_PREFIXES.some((p) => sk.startsWith(p) && sk.length > p.length);
+}
 
 const MAX_ITEMS_PER_REQUEST = 500;
 const BATCH_SIZE = 25; // DynamoDB BatchWriteItem hard limit
@@ -52,10 +64,21 @@ class HttpError extends Error {
 
 let jwksCache = null;
 let jwksFetchedAt = 0;
+let jwksRefreshedAt = 0;
 const JWKS_TTL_MS = 60 * 60 * 1000;
 
-async function getJwks() {
-  if (jwksCache && Date.now() - jwksFetchedAt < JWKS_TTL_MS) return jwksCache;
+/* Cognito rotates signing keys. Between a rotation and this cache expiring,
+   perfectly valid tokens carry a `kid` we haven't seen, so a cache miss must
+   be able to trigger a refetch — otherwise sign-in fails for up to an hour
+   and then fixes itself, which is a miserable thing to debug.
+
+   The floor is what stops that being a denial-of-service vector: without it,
+   anyone can force a JWKS fetch per request just by sending a garbage `kid`.
+   One forced refetch per minute is plenty for a real rotation and useless as
+   an amplifier. */
+const JWKS_REFRESH_FLOOR_MS = 60 * 1000;
+
+async function fetchJwks() {
   const res = await fetch(`${ISSUER}/.well-known/jwks.json`);
   if (!res.ok) throw new HttpError(500, "could not fetch signing keys");
   const body = await res.json();
@@ -63,6 +86,24 @@ async function getJwks() {
   jwksCache = body.keys;
   jwksFetchedAt = Date.now();
   return jwksCache;
+}
+
+async function getJwks() {
+  if (jwksCache && Date.now() - jwksFetchedAt < JWKS_TTL_MS) return jwksCache;
+  return fetchJwks();
+}
+
+/* Returns null rather than throwing, so the caller decides the status code. */
+async function findSigningKey(kid) {
+  const keys = await getJwks();
+  const hit = keys.find((k) => k.kid === kid);
+  if (hit) return hit;
+
+  if (Date.now() - jwksRefreshedAt < JWKS_REFRESH_FLOOR_MS) return null;
+  jwksRefreshedAt = Date.now();
+
+  const refreshed = await fetchJwks();
+  return refreshed.find((k) => k.kid === kid) ?? null;
 }
 
 function b64url(segment) {
@@ -89,9 +130,14 @@ async function verifyToken(token) {
   if (header.alg !== "RS256") throw new HttpError(401, "unsupported algorithm");
   if (!header.kid) throw new HttpError(401, "missing key id");
 
-  const keys = await getJwks();
-  const jwk = keys.find((k) => k.kid === header.kid);
+  const jwk = await findSigningKey(header.kid);
   if (!jwk) throw new HttpError(401, "unknown signing key");
+
+  /* The JWKS is fetched over TLS from our own issuer, so a non-RSA key here
+     would be surprising. Assert it anyway: createPublicKey happily builds an
+     EC key from an EC JWK, and passing one to an RSA-SHA256 verify is a
+     confusing failure rather than a clean rejection. */
+  if (jwk.kty !== "RSA") throw new HttpError(401, "unsupported key type");
 
   const signatureValid = cryptoVerify(
     "RSA-SHA256",
@@ -193,7 +239,7 @@ async function handlePost(sub, body) {
     if (typeof sk !== "string" || sk.length === 0 || sk.length > 512) {
       throw new HttpError(400, `item ${i}: sk must be a non-empty string`);
     }
-    if (!ALLOWED_SK_PREFIXES.some((p) => sk === p || sk.startsWith(p))) {
+    if (!isAllowedSk(sk)) {
       throw new HttpError(400, `item ${i}: sk "${sk}" is not an allowed type`);
     }
     if (typeof updatedAt !== "string" || Number.isNaN(Date.parse(updatedAt))) {

@@ -65,11 +65,46 @@ resource "aws_cognito_user_pool" "main" {
     email_sending_account = "COGNITO_DEFAULT"
   }
 
+  /*
+    Multi-factor authentication.
+
+    OPTIONAL rather than ON, deliberately. ON forces every user to complete
+    MFA setup at their next sign-in; if the enrolment flow misbehaves on a
+    pool with exactly one account, the result is a lockout with no second
+    user to recover from. OPTIONAL lets the account enrol first. Switch to
+    ON afterwards — once enrolled, the two are equivalent for this user and
+    ON additionally prevents a future account from skipping it.
+
+    TOTP only. SMS MFA needs an SNS spend limit and a phone number, costs per
+    message, and is the weaker factor: SIM swapping is a routine attack where
+    a stolen TOTP seed is not.
+
+    This matters more than it looks. The refresh token lives in localStorage
+    for 30 days, so a password compromise is a 30-day compromise. A password
+    is the only thing standing in front of that.
+  */
+  mfa_configuration = var.mfa_configuration
+
+  dynamic "software_token_mfa_configuration" {
+    # The block is only valid when MFA is ON or OPTIONAL; including it with
+    # mfa_configuration = "OFF" fails validation.
+    for_each = var.mfa_configuration == "OFF" ? [] : [1]
+    content {
+      enabled = true
+    }
+  }
+
   deletion_protection = "ACTIVE"
 
-  # Pools default to the Essentials tier. Lite is cheaper but drops features
-  # like advanced security; both include the same 10,000 MAU free allowance,
-  # so there's nothing to gain by switching at this scale.
+  # Pools default to the Essentials tier, which carries the 10,000 MAU free
+  # allowance this uses.
+  #
+  # Threat protection (compromised-credential detection, adaptive auth) is
+  # deliberately NOT enabled. It requires the Plus feature plan, so it is not
+  # free — and half of it would not work here anyway: AWS does not perform
+  # compromised-credentials detection for SRP authentication, and this client
+  # is SRP-only. Adaptive authentication alone is not worth a plan upgrade for
+  # a single-user pool. See docs/SECURITY.md, M-4.
 }
 
 # Hosted UI. Saves building sign-up, sign-in, email verification and password

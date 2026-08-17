@@ -6,7 +6,7 @@ optional cloud sync.
 | | |
 |---|---|
 | Assessed | 2026-08-05, remediation through 2026-08-06 |
-| Revision | `main` @ `1599df8` plus the M-2 / L-1 remediation |
+| Revision | `main` @ `f22bf42` plus the M-3 / M-4 / L-2 / L-3 / L-4 / L-5 / L-8 remediation |
 | Method | Manual review of application, infrastructure and pipeline source, plus Checkov 3.3.9 against `infra/` |
 | Reviewed | `api/index.mjs`, `infra/**/*.tf`, `index.html` (cloud sync layer), `sw.js`, `vercel.json`, `.github/workflows/terraform.yml` |
 
@@ -362,11 +362,26 @@ issue an OIDC token to workflows triggered by pull requests **from forks**, so
 this requires push access to a branch in the repository, and the repo has one
 maintainer.
 
-**Remediation:** replace `ReadOnlyAccess` with an inline policy granting only
-what `terraform plan` needs — `s3:GetObject`/`ListBucket` on the state bucket,
-plus `Describe*`/`Get*`/`List*` on the six services in the stack. Consider
-`pull_request_target` or a `workflow_run` split if the repo ever gains
-contributors.
+**Fixed.** `ReadOnlyAccess` is gone, replaced by an inline policy built
+around one distinction: a plan **describes** resources, it never **reads**
+them. Refreshing state needs `DescribeTable`; it never needs `Scan`.
+
+| Statement | Scope |
+|---|---|
+| `ReadTerraformState` | the state bucket and its objects, nothing else in S3 |
+| `DescribeDataResources` | `DescribeTable` and friends on `table/liftlog-*` — no `Query`, `Scan` or `GetItem` |
+| `DescribeUserPool` | named Cognito describes; **no** `ListUsers` |
+| `DescribeStackConfiguration` | config reads for Lambda, logs, CloudWatch, SNS, budgets, IAM |
+| `DenyDataReads` | explicit Deny on every DynamoDB read action, plus `ListUsers`, `ListUsersInGroup`, `AdminGetUser` |
+
+The Deny matters more than it looks: an explicit Deny cannot be overridden, so
+a later widening of the Allows cannot quietly turn this back into a
+data-exfiltration credential.
+
+The trust condition still allows any ref in the repository, and that is now
+defensible on its own terms — what made the wildcard dangerous was the policy
+behind it. Still worth `pull_request_target` or a `workflow_run` split if the
+repo ever gains contributors.
 
 ### M-4 · No MFA on the Cognito pool; 30-day refresh token on the client
 
@@ -381,11 +396,69 @@ the account. The refresh token is valid 30 days and stored in `localStorage`,
 so a credential compromise or a token theft both persist well past the
 1-hour access token window that the design comments rely on.
 
-**Remediation:** set `mfa_configuration = "OPTIONAL"` with
-`software_token_mfa_configuration { enabled = true }` and enrol. For a
-single-user pool, `"ON"` is also viable and strictly better. Separately,
-consider enabling threat protection — it is included in the tier already
-being paid for.
+**REOPENED. MFA is currently OFF.** The attempt to close this failed in an
+instructive way, and the account is now in a state where a second factor
+cannot be added without an app change. What follows is what actually happened,
+because the failure mode is the useful part.
+
+**What was tried.** `mfa_configuration = "OPTIONAL"` with
+`software_token_mfa_configuration { enabled = true }`, then `"ON"` so that
+Cognito's hosted UI would drive enrolment. `OPTIONAL` alone never prompts —
+Cognito only automates TOTP setup when MFA is *required* — so `ON` was
+necessary to reach the enrolment flow at all.
+
+**What went wrong, in order:**
+
+1. Enrolment appeared not to take: `UserMFASettingList` read `null` after
+   scanning the QR code.
+2. On that evidence the authenticator entry was deleted as presumed dead.
+3. It was not dead. The next sign-in challenged for a code "from Iphone14" —
+   a friendly device name, proving a verified association existed.
+4. `admin-set-user-mfa-preference ... Enabled=false` did not help. **The
+   challenge follows the association, not the preference list**, and
+   `UserMFASettingList` reads `null` throughout. That field is not a reliable
+   indicator of whether a user will be challenged.
+5. AWS provides no API to delete a user's software token — only to replace it.
+6. Recovery was `mfa_configuration = "OFF"`.
+
+**Three things worth keeping:**
+
+- **`UserMFASettingList: null` does not mean "no MFA".** It reports the
+  preference, not the association. Diagnosing from it produced a confident
+  wrong conclusion at step 2.
+- **Deleting an authenticator entry is irreversible; re-enrolling is cheap.**
+  The safe order is always enrol the replacement first, delete the old one
+  after.
+- **Deleting and recreating the Cognito user would have been catastrophic
+  here**, and it is the usual internet advice for this situation. The
+  DynamoDB partition key is `USER#${sub}`; a new user means a new `sub` and
+  every workout record orphaned.
+
+**Why it cannot simply be re-enabled.** Setting `ON` or `OPTIONAL` makes
+Cognito challenge the orphaned token again. Replacing it requires
+`AssociateSoftwareToken` + `VerifySoftwareToken`, which need an access token
+carrying the `aws.cognito.signin.user.admin` scope. The client requests only
+`email openid profile`, and the hosted UI will not re-offer setup while an
+association exists. So there is no path to a working second factor from the
+current configuration.
+
+**The real remediation** is a feature, not a config flag:
+
+1. Add `aws.cognito.signin.user.admin` to the client's `allowed_oauth_scopes`
+   and to `CLOUD.scope` in `index.html`.
+2. Build an MFA setup screen: `AssociateSoftwareToken` → render the QR →
+   `VerifySoftwareToken` → `SetUserMFAPreference`.
+3. Confirm with `admin-get-user` that `UserMFASettingList` is populated.
+4. Only then raise `mfa_configuration` to `OPTIONAL`, and to `ON` once
+   confirmed.
+
+That is more work than a Terraform flag, but it is what owning MFA on a public
+client actually costs — and it produces a re-enrolment path, which is the
+thing whose absence caused all of this.
+
+**Residual risk in the meantime:** single-factor authentication is the only
+gate on the account, and the refresh token lives in `localStorage` for 30
+days. That was the original finding and it is unchanged.
 
 ### M-5 · Function URL is unauthenticated at the edge
 
@@ -424,6 +497,52 @@ this before adding a second Lambda, not after. The longer-term answer is the
 same as M-1 — CloudFront with WAF and a rate-based rule — which is not
 justified at current scale; the $5 budget alarm remains the control that
 actually fires.
+
+### M-6 · Sign-out did not end the Cognito session
+
+**`index.html` `cloudSignOut()`** — fixed
+
+`cloudSignOut()` cleared `tokens` from `localStorage`, reset the sync
+metadata, and stopped. It never called Cognito's `/logout` endpoint, and the
+app contained no reference to `/logout` anywhere — despite `logout_urls` being
+configured in Terraform since the pool was created.
+
+The hosted UI keeps its own session cookie on the Cognito domain, independent
+of anything this app stores. Clearing local tokens therefore ended the app's
+session and not the browser's. The next sign-in hit `/oauth2/authorize`, found
+a live session, and returned an authorization code immediately — no password,
+no MFA challenge.
+
+Two consequences, and the second is worse than the first:
+
+1. **On a shared or borrowed device, "Signed out" was false.** Anyone with the
+   browser could tap sign in and be returned to the account without
+   credentials.
+2. **It masked whether MFA was working.** After enabling `mfa_configuration =
+   "ON"` and enrolling an authenticator, signing out and back in did not
+   prompt for a code — which looks exactly like MFA being broken. It wasn't
+   evidence of that either way, because no authentication was happening at
+   all. A security control that silently isn't exercised is indistinguishable
+   from one that isn't working.
+
+Rated Medium rather than Low because it defeated a control the user was
+explicitly invoking, and because point 2 makes it a diagnostic hazard: it
+produces misleading evidence about a *different* control.
+
+**Fixed.** `cloudSignOut()` now clears local state first, then redirects to
+`${CLOUD.domain}/logout?client_id=…&logout_uri=…`. Clearing before redirecting
+means the local outcome is identical if the navigation never completes.
+
+`logout_uri` must exactly match an entry in the pool's `logout_urls`;
+`location.origin + '/'` matches the committed default. If hosting ever moves,
+both change together — the same coupling that caused H-2, so it is worth
+remembering they are linked.
+
+The offline case is handled rather than ignored: this is an offline-first app,
+and redirecting to an unreachable domain would strand the user on a browser
+error page. When `navigator.onLine` is explicitly `false`, local tokens are
+still cleared and the toast says plainly that the browser session is still
+open.
 
 ### L-1 · Entity IDs interpolated into HTML attributes without escaping
 
@@ -492,8 +611,10 @@ So this is defence that is currently redundant rather than a live hole — but
 it is redundant by coincidence of the PKCE implementation, not by design, and
 the next refactor of the redirect handler could remove the coincidence.
 
-**Remediation:** generate a random `state` alongside the verifier, store both
-in `sessionStorage`, and compare on return before exchanging.
+**Fixed.** A random `state` is generated alongside the verifier, stored in
+`sessionStorage`, and compared on return before the code is exchanged. Both
+values are cleared before any early return, so a failed attempt cannot leave a
+verifier behind for a second one to reuse.
 
 ### L-3 · `debug_allow_any_ref` escape hatch remains in the codebase
 
@@ -509,7 +630,12 @@ The OIDC failure it was added to diagnose has been resolved. Leaving a
 one-variable path from "PR author" to "account admin" in the tree is not worth
 the diagnostic convenience.
 
-**Remediation:** delete the variable and both conditional expressions.
+**Fixed.** Variable removed from the root and the `cicd` module, and the
+trust condition collapsed to a plain `StringEquals` on the default branch ref.
+If a sub-claim mismatch ever needs diagnosing again, the CloudTrail event for
+the failed `AssumeRoleWithWebIdentity` call carries the real claim — read it
+there rather than widening the trust policy to find it. `infra/PHASE6.md`
+still describes the old technique as history.
 
 ### L-4 · JWKS cache does not refetch on unknown `kid`
 
@@ -522,9 +648,11 @@ When Cognito rotates signing keys, valid tokens are rejected for up to an hour.
 Availability rather than security, and low impact at one user, but it will
 present as an inexplicable sign-in failure that resolves itself.
 
-**Remediation:** on `kid` miss, refetch once (guarded against repeated
-refetches so an invalid `kid` cannot be used to hammer the JWKS endpoint)
-before returning 401.
+**Fixed.** A `kid` miss now triggers one refetch, floored at one per minute
+so a garbage `kid` cannot be used to force a JWKS fetch per request. Also
+added while in here: an explicit `jwk.kty !== "RSA"` check before
+`createPublicKey`, so a non-RSA key produces a clean 401 rather than a
+confusing verify failure.
 
 ### L-5 · `sk` prefix allowlist matches without a delimiter check
 
@@ -542,7 +670,10 @@ The allowlist's stated purpose is to stop a caller inventing item types.
 Within the caller's own partition the impact is storing junk in their own
 records, so this is a hardening nit.
 
-**Remediation:** require either exact match or `p.endsWith("#") && sk.startsWith(p)`.
+**Fixed.** Split into `ALLOWED_SK_EXACT` (`PROFILE`) and
+`ALLOWED_SK_PREFIXES` (the delimited ones), with prefixes additionally
+requiring `sk.length > p.length` so a bare `WORKOUT#` is rejected too. A
+prefix without a delimiter is not a namespace.
 
 ### L-6 · AWS account ID committed to a public repository
 
@@ -589,7 +720,10 @@ branch which checks `res.status === 200`. A 5xx page, or a captive-portal
 interception response, can be written over the cached app shell and then
 served as the offline fallback until the next successful load.
 
-**Remediation:** mirror the status check from the asset branch.
+**Fixed.** The navigation branch now caches only when `res.ok` **and**
+`res.type === 'basic'`. The second condition rejects opaque cross-origin
+responses, which is what a captive portal's interception looks like from
+inside a service worker — the case the status check alone would miss.
 
 ### Informational
 
@@ -632,31 +766,30 @@ project and each would need revisiting if that changed.
 | H-2 | High | **Fixed & applied** — CI and local plans now identical |
 | M-1 | Medium | Open — folds into Phase 5 |
 | M-2 | Medium | Fixed — CSP + security headers in vercel.json |
-| M-3 | Medium | Open |
-| M-4 | Medium | Open |
+| M-3 | Medium | Fixed — plan role scoped, data reads explicitly denied |
+| M-4 | Medium | **REOPENED** — MFA OFF; orphaned TOTP association blocks re-enrolment |
 | M-5 | Medium | Open — folds into Phase 5 |
-| L-1 | Low | Fixed — 10 interpolations escaped, build 9 |
-| L-2 | Low | Open |
-| L-3 | Low | Open |
-| L-4 | Low | Open |
-| L-5 | Low | Open |
+| M-6 | Medium | Fixed — sign-out now ends the Cognito session |
+| L-1 | Low | Fixed — 10 interpolations escaped |
+| L-2 | Low | Fixed — OAuth `state` generated and verified |
+| L-3 | Low | Fixed — variable deleted |
+| L-4 | Low | Fixed — guarded JWKS refetch on `kid` miss |
+| L-5 | Low | Fixed — exact/prefix split with delimiter check |
 | L-6 | Low | Accepted |
-| L-7 | Low | Keys rotated; push protection still to enable |
-| L-8 | Low | Open |
+| L-7 | Low | Keys rotated; push protection enabled |
+| L-8 | Low | Fixed — status and response-type check |
 
-Nothing High remains open, and M-2 and L-1 are closed. Suggested order for
-the rest:
+Every finding is now closed except two, and both are deliberate:
 
-1. **M-4** — a two-line Terraform change plus enrolling an authenticator.
-   Single-factor auth is now the weakest remaining link in the chain that
-   protects the data.
-2. **L-3** — delete `debug_allow_any_ref`. One variable stands between a pull
-   request branch and the apply role.
-3. **M-3** — replace the plan role's account-wide `ReadOnlyAccess` with a
-   policy scoped to what `terraform plan` actually reads.
-4. **L-4, L-5, L-8** — small correctness fixes, batchable.
-5. **L-2** — add OAuth `state`. Currently redundant with PKCE, but only by
-   coincidence.
+- **M-1 and M-5** — the public Lambda function URL and its unauthenticated
+  invocation cost. Both resolve with CloudFront + Origin Access Control,
+  which arrives with Phase 5.
+- **L-6** — the AWS account ID in a public repo. Unavoidable; the Cognito
+  hosted-UI domain publishes it regardless.
+
+One follow-up action, not a finding: **set `mfa_configuration = "ON"` once an
+authenticator is enrolled.** `OPTIONAL` was chosen to avoid a lockout during
+enrolment, not as the end state.
 
 M-1 and M-5 resolve together whenever Phase 5 happens; there is no reason to
 build a CloudFront distribution solely for them.
@@ -786,7 +919,7 @@ nothing meaningful goes unexamined.
 | Cognito client | `55s97g354jr3al3jdsk5a0or6g` |
 | DynamoDB table | `liftlog-prod` |
 | Lambda | `liftlog-prod-api` |
-| App build | 8 (`const BUILD = 8` in `index.html`, `liftlog-v8` in `sw.js`) |
+| App build | 10 (`const BUILD` in `index.html`, `liftlog-v10` in `sw.js`) — bump both when shipping client changes |
 
 Background and rationale for existing architectural decisions:
 [`DECISIONS.md`](DECISIONS.md). CI scanning that enforces parts of this

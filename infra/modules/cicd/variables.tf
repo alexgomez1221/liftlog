@@ -38,22 +38,6 @@ variable "default_branch" {
   default     = "main"
 }
 
-variable "debug_allow_any_ref" {
-  description = <<-EOT
-    TEMPORARY DIAGNOSTIC. Widens both roles' sub condition to
-    repo:<owner>/<repo>:* so any ref, PR or environment in this repository
-    can assume them.
-
-    Use only to bisect an "sts:AssumeRoleWithWebIdentity not authorized"
-    failure: if CI succeeds with this on, the sub claim differs from the
-    expected one and can be read from CloudTrail, then pinned exactly.
-    Set back to false as soon as you know.
-
-    Still scoped to this repository — never a blanket trust of GitHub.
-  EOT
-  type        = bool
-  default     = false
-}
 
 variable "create_oidc_provider" {
   description = "Set false if token.actions.githubusercontent.com already exists in this account — it's account-wide, and a second one conflicts."

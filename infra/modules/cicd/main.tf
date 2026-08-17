@@ -52,6 +52,11 @@ locals {
     : var.github_repo
   )
 
+  # Matches infra/bootstrap: "${var.project}-tfstate-${account_id}". var.name
+  # here IS var.project (see the module call in infra/main.tf), so this stays
+  # correct without threading another variable through.
+  state_bucket = "${var.name}-tfstate-${data.aws_caller_identity.current.account_id}"
+
   # Parenthesised so the ternary can wrap without HCL treating the newline
   # as the end of the expression.
   oidc_arn = (
@@ -88,12 +93,18 @@ data "aws_iam_policy_document" "plan_trust" {
       type. Without the repo prefix, any GitHub repository on the internet
       could assume this role — that prefix is the load-bearing part.
 
-      The wildcard tail is a considered tradeoff rather than laziness. This
-      role holds ReadOnlyAccess and nothing more: the worst a branch or
-      workflow in this repo can do with it is read state it could already
-      read. Pinning the exact event claim bought no security here and cost
-      real time, because the pull_request sub isn't the documented
+      The wildcard tail is a considered tradeoff rather than laziness.
+      Pinning the exact event claim bought no security here and cost real
+      time, because the pull_request sub isn't the documented
       repo:<owner>/<repo>:pull_request shape.
+
+      What makes the wildcard acceptable is the policy attached below, not
+      the trust condition. This role can describe the stack's configuration
+      and read Terraform state; it cannot read a single DynamoDB item or list
+      a Cognito user. An earlier version attached the managed ReadOnlyAccess
+      policy, which could do both — with that policy the wildcard tail was a
+      genuine hole, because a pull request can change the workflow file it
+      runs under.
 
       The apply role — which can change infrastructure — keeps an exact
       match on the branch ref. That's where precision earns its keep.
@@ -112,13 +123,152 @@ resource "aws_iam_role" "plan" {
   max_session_duration = 3600
 }
 
-resource "aws_iam_role_policy_attachment" "plan_readonly" {
-  role       = aws_iam_role.plan.name
-  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+/*
+  Previously this attached the AWS-managed ReadOnlyAccess policy. That was
+  described as "read state it could already read", which understated it by a
+  wide margin: ReadOnlyAccess is account-wide and permits dynamodb:Scan on
+  liftlog-prod — every workout record — plus cognito-idp:ListUsers and
+  s3:GetObject across every bucket.
+
+  It matters because the trust policy above deliberately allows any ref in
+  the repository, and for pull_request events GitHub runs the workflow file
+  from the PR head. A pull request that edited terraform.yml to add a
+  `dynamodb scan | curl` step would have run with these credentials. Fork PRs
+  are not issued an OIDC token, so this needed push access to a branch — but
+  "needs to be an insider" is not the same as "cannot happen".
+
+  Scoped to what `terraform plan` actually does: refresh state, which means
+  DESCRIBING every managed resource. Reading their contents is never part of
+  a plan. See docs/SECURITY.md finding M-3.
+*/
+data "aws_iam_policy_document" "plan" {
+  /*
+    CKV_AWS_356 fires on the two statements below that use Resource = "*".
+    Unlike the apply role's equivalent suppression, this one is narrow, and
+    the distinction is worth stating rather than waving at:
+
+      - Every action in those statements is a read of CONFIGURATION. There is
+        no Get/Query/Scan on a data store among them.
+      - The actions that would read data are explicitly Denied at the bottom
+        of this document, and an explicit Deny cannot be overridden.
+      - Several genuinely cannot be scoped: lambda:ListFunctions,
+        logs:DescribeLogGroups and cloudwatch:DescribeAlarms are account-level
+        API calls that reject a resource ARN outright.
+
+    The statements that CAN be scoped are: DynamoDB is pinned to
+    table/liftlog-*, and S3 to the state bucket and its objects.
+  */
+  #checkov:skip=CKV_AWS_356:Read-only configuration describes on services whose list actions do not accept a resource ARN. Data reads are explicitly Denied below and the scopable statements are scoped. See docs/SECURITY.md M-3.
+
+  # Terraform's S3 backend: read the state object and its lock. Plan runs with
+  # -lock=false in CI precisely so this role never needs write access here.
+  statement {
+    sid    = "ReadTerraformState"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:GetBucketVersioning",
+    ]
+    resources = [
+      "arn:aws:s3:::${local.state_bucket}",
+      "arn:aws:s3:::${local.state_bucket}/*",
+    ]
+  }
+
+  /*
+    Describe the table, do not read from it.
+
+    This is the whole point of the finding: a plan needs DescribeTable to
+    detect drift in the table's configuration. It never needs Query, Scan or
+    GetItem — those read user data — so they are absent, and no wildcard
+    reintroduces them.
+  */
+  statement {
+    sid    = "DescribeDataResources"
+    effect = "Allow"
+    actions = [
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeContinuousBackups",
+      "dynamodb:DescribeTimeToLive",
+      "dynamodb:ListTagsOfResource",
+    ]
+    resources = ["arn:aws:dynamodb:*:${data.aws_caller_identity.current.account_id}:table/${var.name}-*"]
+  }
+
+  /*
+    Cognito: Describe and Get, but NOT List*.
+
+    cognito-idp:ListUsers would expose the user directory, and a plan has no
+    use for it. Named actions rather than a Describe/Get wildcard so a
+    future AWS API addition cannot quietly widen this.
+  */
+  statement {
+    sid    = "DescribeUserPool"
+    effect = "Allow"
+    actions = [
+      "cognito-idp:DescribeUserPool",
+      "cognito-idp:DescribeUserPoolClient",
+      "cognito-idp:DescribeUserPoolDomain",
+      "cognito-idp:GetUserPoolMfaConfig",
+      "cognito-idp:ListTagsForResource",
+    ]
+    resources = ["*"]
+  }
+
+  # The remaining services hold no user data — their configuration is the only
+  # thing to read, and most of these actions do not support resource-level
+  # permissions.
+  statement {
+    sid    = "DescribeStackConfiguration"
+    effect = "Allow"
+    actions = [
+      "lambda:Get*",
+      "lambda:List*",
+      "logs:Describe*",
+      "logs:ListTagsForResource",
+      "cloudwatch:Describe*",
+      "cloudwatch:Get*",
+      "cloudwatch:List*",
+      "sns:Get*",
+      "sns:List*",
+      "budgets:Describe*",
+      "budgets:View*",
+      "iam:Get*",
+      "iam:List*",
+      "sts:GetCallerIdentity",
+      "tag:GetResources",
+    ]
+    resources = ["*"]
+  }
+
+  # Belt and braces: an explicit Deny survives any future widening of the
+  # Allows above. These are the actions that would turn a plan credential
+  # into a data-exfiltration credential.
+  statement {
+    sid    = "DenyDataReads"
+    effect = "Deny"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:BatchGetItem",
+      "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:PartiQLSelect",
+      "cognito-idp:ListUsers",
+      "cognito-idp:ListUsersInGroup",
+      "cognito-idp:AdminGetUser",
+    ]
+    resources = ["*"]
+  }
 }
 
-# ReadOnlyAccess covers reading state from S3. Plan runs with -lock=false in
-# CI precisely so this role never needs write access to the state bucket.
+resource "aws_iam_role_policy" "plan" {
+  name   = "${var.name}-gha-plan-policy"
+  role   = aws_iam_role.plan.id
+  policy = data.aws_iam_policy_document.plan.json
+}
 
 # ---------------------------------------------------------------------------
 # Apply role — default branch only, write access
@@ -140,19 +290,26 @@ data "aws_iam_policy_document" "apply_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Exact match on the branch ref, not StringLike. A wildcard here would
-    # let a pull request branch assume the apply role.
-    #
-    # debug_allow_any_ref switches to StringLike with a repo-wide wildcard,
-    # purely to bisect an authorization failure. Not a permanent setting.
+    /*
+      Exact match on the branch ref — StringEquals, never StringLike. A
+      wildcard here would let any pull request branch assume the role that
+      can change infrastructure.
+
+      This was previously switchable to a repo-wide wildcard via a
+      `debug_allow_any_ref` variable, added to bisect an OIDC authorization
+      failure. That failure was resolved (the sub claim embeds numeric IDs —
+      see the repo_claim local above), and the variable has been removed. A
+      one-flag path from "opens a pull request" to "holds the apply role" is
+      not worth keeping for a diagnostic that has already served its purpose.
+
+      If a sub-claim mismatch ever needs diagnosing again, read the claim
+      from the CloudTrail event for the failed AssumeRoleWithWebIdentity call
+      rather than widening the trust policy to find it.
+    */
     condition {
-      test     = var.debug_allow_any_ref ? "StringLike" : "StringEquals"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        var.debug_allow_any_ref
-        ? "repo:${local.repo_claim}:*"
-        : "repo:${local.repo_claim}:ref:refs/heads/${var.default_branch}"
-      ]
+      values   = ["repo:${local.repo_claim}:ref:refs/heads/${var.default_branch}"]
     }
   }
 }

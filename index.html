@@ -356,7 +356,7 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 9;
+const BUILD = 11;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -2445,27 +2445,69 @@ async function challengeFor(verifier){
   return b64urlFromBytes(new Uint8Array(digest));
 }
 
+/* `state` is the CSRF defence for the redirect leg: it proves the code coming
+   back belongs to a flow THIS browser started, not one an attacker started and
+   then handed us a link to. Without it, a victim can be walked into signing in
+   as the attacker, after which their workouts sync into the attacker's account.
+
+   PKCE happens to block that here already — the exchange uses the verifier
+   from this browser's sessionStorage, which won't match an attacker's code —
+   but that is a coincidence of how the redirect handler is written, not a
+   defence anyone designed. One refactor away from being untrue. */
 async function cloudSignIn(){
   if(!cloudConfigured()){ toast('Cloud sync not configured'); return; }
   const verifier = randomVerifier();
+  const state = randomVerifier().slice(0, 32);
   sessionStorage.setItem('ll_pkce', verifier);
+  sessionStorage.setItem('ll_state', state);
   const challenge = await challengeFor(verifier);
   const q = new URLSearchParams({
     client_id: CLOUD.clientId,
     response_type: 'code',
     scope: CLOUD.scope,
     redirect_uri: redirectUri(),
+    state,
     code_challenge: challenge,
     code_challenge_method: 'S256'
   });
   location.href = `${CLOUD.domain}/oauth2/authorize?${q}`;
 }
 
+/* Sign out of Cognito, not just of this tab.
+
+   This used to clear localStorage and stop there. That leaves the hosted UI's
+   own session cookie alive, so the next sign-in hits /oauth2/authorize, finds
+   a valid session, and hands back a code with no password and no MFA prompt.
+   "Signed out" was true of this app and false of the browser — on a shared or
+   borrowed device, anyone could tap sign in and be straight back into the
+   account.
+
+   Local state is cleared BEFORE the redirect so the outcome is the same even
+   if the navigation never completes. */
 function cloudSignOut(){
+  const hadSession = signedIn();
+
   tokens = null; save(LS_TOKENS, null);
   syncMeta = {lastSyncAt:null, lastError:null, lastOkAt:null};
   save(LS_SYNC, syncMeta);
-  toast('Signed out — local data untouched');
+  sessionStorage.removeItem('ll_pkce');
+  sessionStorage.removeItem('ll_state');
+
+  /* Offline-first: don't strand the user on a browser error page in a gym
+     basement. Local tokens are already gone, so the account is no longer
+     usable from here — but be honest that the hosted session is still open. */
+  if(hadSession && cloudConfigured() && navigator.onLine !== false){
+    const q = new URLSearchParams({
+      client_id: CLOUD.clientId,
+      logout_uri: redirectUri()   // must exactly match a Cognito logout_urls entry
+    });
+    location.href = `${CLOUD.domain}/logout?${q}`;
+    return;
+  }
+
+  toast(hadSession && navigator.onLine === false
+    ? 'Signed out here — sign out again online to end the browser session'
+    : 'Signed out — local data untouched');
   renderAll();
 }
 
@@ -2489,9 +2531,19 @@ async function handleAuthRedirect(){
   if(!code) return false;
 
   const verifier = sessionStorage.getItem('ll_pkce');
+  const expectedState = sessionStorage.getItem('ll_state');
   history.replaceState({}, '', location.pathname);
   sessionStorage.removeItem('ll_pkce');
+  sessionStorage.removeItem('ll_state');
   if(!verifier) return false;
+
+  /* Reject a code we didn't ask for. Both values are cleared above before any
+     early return, so a failed attempt can't leave a verifier lying around for
+     a second one to reuse. */
+  if(!expectedState || params.get('state') !== expectedState){
+    toast('Sign-in failed — unexpected response');
+    return false;
+  }
 
   try{
     const res = await fetch(`${CLOUD.domain}/oauth2/token`, {

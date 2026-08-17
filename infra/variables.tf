@@ -71,11 +71,6 @@ variable "create_oidc_provider" {
   default     = true
 }
 
-variable "debug_allow_any_ref" {
-  description = "TEMPORARY. Widens the CI roles' sub condition to repo:<owner>/<repo>:* to diagnose an OIDC authorization failure. Set false once resolved."
-  type        = bool
-  default     = false
-}
 
 variable "github_owner_id" {
   description = "Numeric GitHub account ID — GitHub's OIDC sub claim embeds it. From https://api.github.com/users/<owner>."
@@ -93,6 +88,46 @@ variable "allow_signup" {
   description = "Allow self-registration in the Cognito pool. False = invite-only, correct for a single-user app."
   type        = bool
   default     = false
+}
+
+variable "mfa_configuration" {
+  description = <<-EOT
+    Cognito MFA: OFF, OPTIONAL or ON.
+
+    OFF, and that is a considered position rather than an oversight. Do not
+    raise it without reading this and docs/SECURITY.md M-4 first.
+
+    The pool has an orphaned TOTP association. It was enrolled through the
+    hosted UI, the authenticator entry was then deleted, and AWS provides no
+    way to remove a user's software token — only to replace it. So a verified
+    token exists whose secret is lost.
+
+    With mfa_configuration = "ON", Cognito challenges that token on every
+    sign-in and the account is unreachable. That happened, and the way out was
+    setting this OFF. `admin-set-user-mfa-preference` does NOT help: the
+    challenge follows the association, not the preference list, and
+    UserMFASettingList reads null throughout.
+
+    Replacing the token needs AssociateSoftwareToken + VerifySoftwareToken,
+    which require an access token carrying the
+    aws.cognito.signin.user.admin scope. This client does not request that
+    scope and the hosted UI will not re-offer setup while an association
+    exists. So there is currently no path to a working second factor, and
+    setting this to ON or OPTIONAL only re-creates the lockout.
+
+    To raise it, in this order:
+      1. Add aws.cognito.signin.user.admin to the client's allowed_oauth_scopes
+         and to CLOUD.scope in index.html.
+      2. Build the MFA setup flow in the app (associate -> verify ->
+         SetUserMFAPreference), which also gives a re-enrolment path.
+      3. Verify enrolment succeeded via admin-get-user.
+      4. Only then set this to "OPTIONAL", and to "ON" once confirmed working.
+
+    TOTP only when it is re-enabled — SMS is the weaker factor and costs per
+    message.
+  EOT
+  type        = string
+  default     = "OFF"
 }
 
 variable "reserved_concurrency" {

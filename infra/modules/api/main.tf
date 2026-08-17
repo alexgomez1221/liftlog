@@ -24,7 +24,7 @@ data "archive_file" "lambda" {
 # on small AWS accounts.
 resource "aws_cloudwatch_log_group" "lambda" {
   #checkov:skip=CKV_AWS_158:CloudWatch encrypts log data at rest by default. A CMK would add KMS charges and key management to protect handler logs that deliberately contain no tokens, no request bodies and no user data — 5xx paths log an error object, 4xx paths log nothing. Same reasoning as the DynamoDB key decision.
-  #checkov:skip=CKV_AWS_338:The one-year retention this check wants is a compliance-retention requirement, not a security control, and it inverts the intent here. Retention is 7 days deliberately: never-expiring logs are the most common surprise cost on a small account, and there is no audit obligation on a personal project. See infra/modules/api/variables.tf.
+  #checkov:skip=CKV_AWS_338:The one-year retention this check wants is a compliance-retention requirement, not a security control, and it inverts the intent here. Retention is deliberately short (see log_retention_days): never-expiring logs are the most common surprise cost on a small account, and there is no audit obligation on a personal project. See infra/modules/api/variables.tf.
   name              = "/aws/lambda/${var.name}"
   retention_in_days = var.log_retention_days
 }

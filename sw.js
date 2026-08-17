@@ -5,7 +5,7 @@
  * Bump CACHE_VERSION whenever you ship changes so phones pick them up.
  * On iOS you must force-close the app (swipe up) and reopen for the new SW to activate.
  */
-const CACHE_VERSION = 'liftlog-v9';
+const CACHE_VERSION = 'liftlog-v11';
 const SHELL = [
   './',
   './index.html',
@@ -48,8 +48,17 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(req)
         .then(res => {
-          const copy = res.clone();
-          caches.open(CACHE_VERSION).then(c => c.put('./index.html', copy)).catch(() => {});
+          // Only cache a real page. This branch used to cache unconditionally,
+          // so a 5xx, a maintenance page, or a captive portal's interception
+          // response would overwrite the app shell — and then be served as the
+          // OFFLINE FALLBACK until the next successful load. That turns a
+          // transient upstream blip into a persistently broken install.
+          // res.type === 'basic' rejects opaque cross-origin responses, which
+          // is what a portal redirect looks like from here.
+          if (res && res.ok && res.type === 'basic') {
+            const copy = res.clone();
+            caches.open(CACHE_VERSION).then(c => c.put('./index.html', copy)).catch(() => {});
+          }
           return res;
         })
         .catch(() => caches.match('./index.html').then(r => r || caches.match('./')))

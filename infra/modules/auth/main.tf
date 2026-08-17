@@ -133,7 +133,22 @@ resource "aws_cognito_user_pool_client" "web" {
 
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_flows_user_pool_client = true
-  allowed_oauth_scopes                 = ["email", "openid", "profile"]
+  /*
+    aws.cognito.signin.user.admin is what lets the app manage the signed-in
+    user's own MFA: AssociateSoftwareToken, VerifySoftwareToken and
+    SetUserMFAPreference all reject an access token without it.
+
+    "admin" in the name is misleading. It grants a user authority over their
+    OWN account only — it is not an administrative scope over the pool, and it
+    confers nothing on the Lambda API, which authorises on the verified `sub`
+    and ignores scopes entirely.
+
+    Without this the pool has no self-service enrolment path at all, which is
+    what turned a deleted authenticator entry into a lockout: Cognito cannot
+    remove a software token, only replace it, and replacing it needs these
+    calls. See docs/SECURITY.md M-4.
+  */
+  allowed_oauth_scopes = ["email", "openid", "profile", "aws.cognito.signin.user.admin"]
 
   callback_urls = var.callback_urls
   logout_urls   = var.logout_urls

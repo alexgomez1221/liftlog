@@ -5,43 +5,33 @@ itself — assets, trust boundaries, threat model, and the full detail behind
 every finding ID below — is in [`SECURITY.md`](SECURITY.md). This file is just
 the queue.
 
-**Status: closed except M-4 (reopened — MFA is OFF, see below), M-1 and M-5
-(both deferred to Phase 5), and L-6 (accepted).** See the summary table in
-`SECURITY.md` §8 for the authoritative status of each one.
+**Status: all findings closed except M-1 and M-5 (both deferred to Phase 5)
+and L-6 (accepted).** One follow-up action remains: enrol MFA and raise
+`mfa_configuration` to `ON`. See `SECURITY.md` §8 for authoritative status.
 
 ---
 
 ## Queue
 
-One item needs real work (M-4). The rest are open by choice.
+One follow-up action, then everything actionable is done.
 
-### M-4 (REOPENED) · MFA is OFF and cannot be re-enabled as-is
+### Follow-up · Enrol MFA, then set `mfa_configuration = "ON"`
 
-**Do not raise `mfa_configuration` above `OFF` until step 2 below is done.**
-Doing so locks the account out of sign-in. This has already happened once.
+The in-app enrolment flow now exists (Settings → Two-factor authentication),
+and `mfa_configuration` is `OPTIONAL` — MFA is available but not required, and
+no factor is enrolled yet.
 
-**Why.** The pool has an orphaned TOTP association: enrolled through the
-hosted UI, authenticator entry then deleted, and AWS offers no way to remove
-a user's software token — only to replace it. Cognito challenges that token
-whenever MFA is required, and the secret is gone.
+1. Apply the Terraform change (adds the scope, sets OPTIONAL) and deploy the app.
+2. **Sign out and back in.** Existing tokens predate the new scope; the setup
+   screen will tell you so if you skip this.
+3. Settings → Two-factor authentication → Set up authenticator.
+4. Confirm: `admin-get-user ... --query UserMFASettingList` should return
+   `["SOFTWARE_TOKEN_MFA"]`.
+5. Only then set `mfa_configuration = "ON"` and apply.
 
-Two things that do *not* work, both already tried:
-
-- `admin-set-user-mfa-preference ... Enabled=false` — the challenge follows
-  the **association**, not the preference list.
-- Reading `UserMFASettingList` to decide whether a user has MFA — it reports
-  the preference and stayed `null` throughout, including while the user was
-  actively being challenged.
-
-**The fix is a feature, in this order:**
-
-1. Add `aws.cognito.signin.user.admin` to `allowed_oauth_scopes` on the
-   Cognito client, and to `CLOUD.scope` in `index.html`.
-2. Build an MFA setup screen: `AssociateSoftwareToken` → render QR →
-   `VerifySoftwareToken` → `SetUserMFAPreference`. This also gives a
-   re-enrolment path, whose absence is what caused the lockout.
-3. Verify with `admin-get-user` that `UserMFASettingList` is populated.
-4. Only then set `mfa_configuration = "OPTIONAL"`, and `"ON"` once confirmed.
+**Keep the old authenticator entry until sign-in is confirmed working.**
+Enrol-then-delete is the safe order. Deleting first is what caused the
+lockout.
 
 ### If you are locked out of Cognito
 
@@ -52,8 +42,21 @@ terraform apply -var 'mfa_configuration=OFF'
 ```
 
 Then **immediately set the default in `infra/variables.tf` to match** and
-commit it. A `-var` flag does not persist, so leaving the committed default
-higher means the next CI apply re-locks you — the same divergence as H-2.
+commit it. A `-var` flag does not persist, so a committed default higher than
+the applied state means the next CI apply re-locks you — the same divergence
+as H-2.
+
+Note that `OFF` also disables `software_token_mfa_configuration`, which makes
+`AssociateSoftwareToken` fail. It gets you back in, but you must return to
+`OPTIONAL` before you can enrol again.
+
+Two things that do **not** work, both already tried:
+
+- `admin-set-user-mfa-preference ... Enabled=false` — the challenge follows
+  the **association**, not the preference list.
+- Reading `UserMFASettingList` to decide whether a user has MFA — it reports
+  the preference and stayed `null` throughout, including while the user was
+  actively being challenged.
 
 **Never delete and recreate the Cognito user to escape this.** It is the usual
 advice online and it would be destructive here: the DynamoDB partition key is

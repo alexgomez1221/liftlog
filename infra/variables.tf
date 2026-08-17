@@ -94,40 +94,43 @@ variable "mfa_configuration" {
   description = <<-EOT
     Cognito MFA: OFF, OPTIONAL or ON.
 
-    OFF, and that is a considered position rather than an oversight. Do not
-    raise it without reading this and docs/SECURITY.md M-4 first.
+    OPTIONAL, and each of the three values matters here. Read this before
+    changing it — a wrong value locked this account out once already.
 
-    The pool has an orphaned TOTP association. It was enrolled through the
-    hosted UI, the authenticator entry was then deleted, and AWS provides no
-    way to remove a user's software token — only to replace it. So a verified
-    token exists whose secret is lost.
+    OFF also disables software_token_mfa_configuration, and without that
+    AssociateSoftwareToken fails with SoftwareTokenMFANotFoundException. So
+    OFF is not merely "no MFA" — it makes enrolment impossible, including the
+    in-app setup screen. It is the emergency setting, not a resting state.
 
-    With mfa_configuration = "ON", Cognito challenges that token on every
-    sign-in and the account is unreachable. That happened, and the way out was
-    setting this OFF. `admin-set-user-mfa-preference` does NOT help: the
-    challenge follows the association, not the preference list, and
-    UserMFASettingList reads null throughout.
+    ON forces a challenge on every sign-in whether or not the user has a
+    usable factor. The pool carries an orphaned TOTP association — enrolled
+    through the hosted UI, authenticator entry then deleted, and AWS offers no
+    way to remove a software token, only to replace it. Under ON, Cognito
+    challenged that dead token and the account became unreachable.
+    admin-set-user-mfa-preference did not help: the challenge follows the
+    association, not the preference list, and UserMFASettingList read null
+    throughout.
 
-    Replacing the token needs AssociateSoftwareToken + VerifySoftwareToken,
-    which require an access token carrying the
-    aws.cognito.signin.user.admin scope. This client does not request that
-    scope and the hosted UI will not re-offer setup while an association
-    exists. So there is currently no path to a working second factor, and
-    setting this to ON or OPTIONAL only re-creates the lockout.
+    OPTIONAL enables TOTP at the pool level (so enrolment works) while
+    challenging only users who have MFA configured. That is what makes the
+    in-app setup screen usable, and it replaces the orphaned association on
+    first successful enrolment.
 
-    To raise it, in this order:
-      1. Add aws.cognito.signin.user.admin to the client's allowed_oauth_scopes
-         and to CLOUD.scope in index.html.
-      2. Build the MFA setup flow in the app (associate -> verify ->
-         SetUserMFAPreference), which also gives a re-enrolment path.
-      3. Verify enrolment succeeded via admin-get-user.
-      4. Only then set this to "OPTIONAL", and to "ON" once confirmed working.
+    Sequence to reach ON safely:
+      1. Apply this at OPTIONAL and confirm sign-in still works.
+      2. Enrol via Settings -> Two-factor authentication in the app.
+      3. Confirm with admin-get-user that UserMFASettingList is populated.
+      4. Only then set ON.
 
-    TOTP only when it is re-enabled — SMS is the weaker factor and costs per
-    message.
+    If sign-in ever breaks: apply OFF, and immediately change this default to
+    match. A -var flag does not persist, and a committed default higher than
+    the applied state means the next CI apply re-locks the account — the same
+    divergence as H-2.
+
+    TOTP only. SMS is the weaker factor and costs per message.
   EOT
   type        = string
-  default     = "OFF"
+  default     = "OPTIONAL"
 }
 
 variable "reserved_concurrency" {

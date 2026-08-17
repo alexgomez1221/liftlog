@@ -434,31 +434,58 @@ necessary to reach the enrolment flow at all.
   DynamoDB partition key is `USER#${sub}`; a new user means a new `sub` and
   every workout record orphaned.
 
-**Why it cannot simply be re-enabled.** Setting `ON` or `OPTIONAL` makes
-Cognito challenge the orphaned token again. Replacing it requires
-`AssociateSoftwareToken` + `VerifySoftwareToken`, which need an access token
-carrying the `aws.cognito.signin.user.admin` scope. The client requests only
-`email openid profile`, and the hosted UI will not re-offer setup while an
-association exists. So there is no path to a working second factor from the
-current configuration.
+**Fixed — enrolment is now a feature of the app.**
 
-**The real remediation** is a feature, not a config flag:
+The underlying problem was never the lockout; it was that a public client with
+no self-service enrolment path has no way back from one. Cognito cannot delete
+a software token, and the hosted UI stops offering setup once an association
+exists, so "lost my authenticator" was terminal. That is now addressed:
 
-1. Add `aws.cognito.signin.user.admin` to the client's `allowed_oauth_scopes`
-   and to `CLOUD.scope` in `index.html`.
-2. Build an MFA setup screen: `AssociateSoftwareToken` → render the QR →
-   `VerifySoftwareToken` → `SetUserMFAPreference`.
-3. Confirm with `admin-get-user` that `UserMFASettingList` is populated.
-4. Only then raise `mfa_configuration` to `OPTIONAL`, and to `ON` once
-   confirmed.
+| Change | Where |
+|---|---|
+| `aws.cognito.signin.user.admin` added to the client's scopes | `infra/modules/auth/main.tf` |
+| Same scope requested by the app | `CLOUD.scope` in `index.html` |
+| `connect-src` allows `cognito-idp.us-east-1.amazonaws.com` | `vercel.json` |
+| Settings → Two-factor authentication | `openMfaSetup()` in `index.html` |
+| `mfa_configuration` back to `OPTIONAL` | `infra/variables.tf` |
 
-That is more work than a Terraform flag, but it is what owning MFA on a public
-client actually costs — and it produces a re-enrolment path, which is the
-thing whose absence caused all of this.
+The flow calls `AssociateSoftwareToken` → `VerifySoftwareToken` →
+`SetUserMFAPreference` against the Cognito IDP JSON API, authorised by the
+access token rather than SigV4, so there is no AWS SDK and no AWS credential
+in the browser. Because association *replaces* any previous token, running it
+also clears the orphaned one.
 
-**Residual risk in the meantime:** single-factor authentication is the only
-gate on the account, and the refresh token lives in `localStorage` for 30
-days. That was the original finding and it is unchanged.
+**The scope name is misleading and worth stating plainly.**
+`aws.cognito.signin.user.admin` grants a user authority over their **own**
+account — it is not administrative access to the pool. It confers nothing on
+the sync API either, which authorises on the verified `sub` and ignores scopes
+entirely.
+
+**Design note: no QR code.** The setup screen offers a tappable
+`otpauth://` link and the base32 secret in groups of four, not a QR image.
+This is a phone-first PWA — a QR rendered on the same screen you are holding
+needs a second device to scan it, while the link opens the authenticator
+directly. It also avoids shipping a QR encoder into a single-file app whose
+CSP forbids external scripts. Desktop users type the key.
+
+**Three deliberate guards, each from something that actually went wrong:**
+
+- Tokens minted before the scope existed fail with an opaque
+  `NotAuthorizedException`. That case is detected and answered with "sign out
+  and back in" instead of the raw AWS message.
+- `mfa_configuration = "OFF"` also disables
+  `software_token_mfa_configuration`, so `AssociateSoftwareToken` fails with
+  `SoftwareTokenMFANotFoundException`. **`OFF` does not merely mean "no MFA";
+  it makes enrolment impossible.** The screen names that specifically.
+- The "Replace authenticator" path tells the user to keep the old entry until
+  sign-in is confirmed. Enrol-then-delete is the safe order, and getting it
+  backwards is what caused the lockout.
+
+**Not yet done:** `mfa_configuration` is `OPTIONAL`, so MFA is available but
+not required, and no factor is enrolled yet. Reaching `ON` means enrolling
+through the new screen, confirming with `admin-get-user`, then raising it.
+Until then single-factor authentication remains the only gate, which is the
+original finding.
 
 ### M-5 · Function URL is unauthenticated at the edge
 
@@ -767,7 +794,7 @@ project and each would need revisiting if that changed.
 | M-1 | Medium | Open — folds into Phase 5 |
 | M-2 | Medium | Fixed — CSP + security headers in vercel.json |
 | M-3 | Medium | Fixed — plan role scoped, data reads explicitly denied |
-| M-4 | Medium | **REOPENED** — MFA OFF; orphaned TOTP association blocks re-enrolment |
+| M-4 | Medium | Fixed — in-app enrolment shipped; enrol, then raise to ON |
 | M-5 | Medium | Open — folds into Phase 5 |
 | M-6 | Medium | Fixed — sign-out now ends the Cognito session |
 | L-1 | Low | Fixed — 10 interpolations escaped |

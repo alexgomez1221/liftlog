@@ -19,9 +19,9 @@ variable "logout_urls" {
 }
 
 variable "mfa_configuration" {
-  description = "OFF, OPTIONAL or ON. Currently OFF — an orphaned TOTP association makes any other value a lockout. See the root variable of the same name and docs/SECURITY.md M-4 before changing."
+  description = "OFF, OPTIONAL or ON. OFF also disables software_token_mfa_configuration, which makes AssociateSoftwareToken fail — it is the emergency setting, not a resting state. See the root variable of the same name and docs/SECURITY.md M-4."
   type        = string
-  default     = "OFF"
+  default     = "OPTIONAL"
 
   validation {
     condition     = contains(["OFF", "OPTIONAL", "ON"], var.mfa_configuration)

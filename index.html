@@ -356,7 +356,7 @@ const LS = {
 };
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 11;
+const BUILD = 12;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -2289,11 +2289,14 @@ el('settingsBtn').onclick = ()=>{
                <button class="btn sm" style="flex:1;" id="stSyncNow">⟳ Sync Now</button>
                <button class="btn sec sm" id="stSignOut">Sign Out</button>
              </div>
+             <button class="btn sec sm block" id="stMfa" style="margin-top:8px;">🔐 Two-factor authentication</button>
              ${syncMeta.lastError ? `<div class="dim" style="color:var(--bad);margin-top:8px;">${esc(syncMeta.lastError)}</div>` : ''}`
           : `<button class="btn block sm" id="stSignIn">Sign In to Sync</button>`;
 
         const si = syncBody.querySelector('#stSignIn');
         if(si) si.onclick = cloudSignIn;
+        const mf = syncBody.querySelector('#stMfa');
+        if(mf) mf.onclick = ()=>{ closeSheet(); openMfaSetup(); };
         const so = syncBody.querySelector('#stSignOut');
         if(so) so.onclick = ()=>{ cloudSignOut(); draw(); };
         const sn = syncBody.querySelector('#stSyncNow');
@@ -2414,7 +2417,12 @@ const CLOUD = {
   api:      "https://mzqyaplq2naklpmhtzh3ch36340kxqgl.lambda-url.us-east-1.on.aws",
   domain:   "https://liftlog-937485903079.auth.us-east-1.amazoncognito.com",
   clientId: "55s97g354jr3al3jdsk5a0or6g",
-  scope:    "email openid profile"
+  /* aws.cognito.signin.user.admin authorises the MFA calls below. Despite the
+     name it grants authority over this user's OWN account only — it is not an
+     administrative scope over the pool, and the sync API ignores scopes
+     entirely (it authorises on the verified `sub`). */
+  scope:    "email openid profile aws.cognito.signin.user.admin",
+  idp:      "https://cognito-idp.us-east-1.amazonaws.com"
 };
 
 const LS_TOKENS = 'll_tokens';
@@ -2602,6 +2610,203 @@ async function cloudFetch(path, options){
     throw new Error(`${res.status} ${body.slice(0,120)}`);
   }
   return res.json();
+}
+
+/* ==================================================================
+   MFA — TOTP enrolment
+
+   Cognito's hosted UI handles the MFA *challenge* at sign-in. What it will
+   not do is let you re-enrol: once a software token is associated, AWS gives
+   no way to delete it, only to replace it, and the hosted UI stops offering
+   setup. Lose the authenticator entry and the account becomes unreachable the
+   moment MFA is required. That is not hypothetical — it happened here, and it
+   is why this exists. See docs/SECURITY.md M-4.
+
+   Three unsigned Cognito calls, authorised by the access token rather than
+   SigV4, so no AWS SDK and no credentials in the browser:
+
+     AssociateSoftwareToken  -> new secret (replaces any previous one)
+     VerifySoftwareToken     -> proves the user holds it
+     SetUserMFAPreference    -> makes it the preferred factor
+
+   All three require the aws.cognito.signin.user.admin scope.
+   ================================================================== */
+
+async function cognitoIdp(action, body){
+  const tok = await accessToken();
+  if(!tok) throw new Error('not signed in');
+  const res = await fetch(CLOUD.idp, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-amz-json-1.1',
+      'x-amz-target': `AWSCognitoIdentityProviderService.${action}`
+    },
+    body: JSON.stringify(Object.assign({AccessToken: tok}, body || {}))
+  });
+  const text = await res.text();
+  let data = {};
+  try{ data = text ? JSON.parse(text) : {}; }catch(e){}
+  if(!res.ok){
+    /* Tokens minted before the scope was added lack it, and the error is
+       opaque unless you name it. Re-signing in is the fix. */
+    const type = (data.__type || '').split('#').pop();
+    if(type === 'NotAuthorizedException' && /scope/i.test(data.message || '')){
+      throw new Error('SCOPE');
+    }
+    throw new Error(data.message || type || `${res.status}`);
+  }
+  return data;
+}
+
+/* Cognito returns UserMFASettingList (the preference) — note it can be empty
+   while a token is still associated and still challenged. Do not treat an
+   empty list as proof that no MFA exists. */
+async function mfaStatus(){
+  const u = await cognitoIdp('GetUser');
+  /* Username is a UUID here (the pool signs in by email alias), which makes a
+     useless label in an authenticator app. Prefer the email attribute. */
+  const email = (u.UserAttributes || []).find(a => a.Name === 'email');
+  return {
+    enabled: (u.UserMFASettingList || []).includes('SOFTWARE_TOKEN_MFA'),
+    preferred: u.PreferredMfaSetting || null,
+    username: (email && email.Value) || u.Username || ''
+  };
+}
+
+/* otpauth:// URI. On a phone this is tappable and opens the authenticator
+   directly, which beats scanning a QR code shown on the same screen you are
+   holding. Desktop users type the secret instead. */
+function otpauthUri(secret, account){
+  const issuer = 'Lift Log';
+  const label  = encodeURIComponent(`${issuer}:${account || 'account'}`);
+  const q = new URLSearchParams({
+    secret,
+    issuer,
+    algorithm: 'SHA1',   // Cognito rejects SHA256 codes
+    digits: '6',
+    period: '30'
+  });
+  return `otpauth://totp/${label}?${q}`;
+}
+
+/* Base32 in groups of four — far easier to type without a transcription
+   error, and every authenticator ignores the spaces. */
+const groupSecret = s => String(s || '').replace(/(.{4})/g, '$1 ').trim();
+
+function openMfaSetup(){
+  sheet('Two-factor authentication', `<div id="mfaBody"><div class="dim">Loading…</div></div>`, root=>{
+    const body = root.querySelector('#mfaBody');
+
+    const fail = (msg)=>{
+      body.innerHTML = `<div class="dim" style="color:var(--bad);">${esc(msg)}</div>`;
+    };
+
+    const scopeHelp = ()=>{
+      body.innerHTML = `
+        <div class="dim" style="color:var(--bad);margin-bottom:10px;">
+          Your sign-in is missing the permission needed to manage MFA.
+        </div>
+        <div class="dim" style="margin-bottom:12px;">
+          This happens once, after the permission was added. Sign out and back
+          in to get a new session, then return here.
+        </div>
+        <button class="btn block sm" id="mfaReauth">Sign Out</button>`;
+      body.querySelector('#mfaReauth').onclick = ()=>cloudSignOut();
+    };
+
+    const showStatus = async ()=>{
+      try{
+        const st = await mfaStatus();
+        body.innerHTML = `
+          <div style="margin-bottom:12px;">
+            ${st.enabled
+              ? '<b style="color:var(--good);">✓ Enabled</b><div class="dim">An authenticator app is registered.</div>'
+              : '<b>Not enabled</b><div class="dim">Your password is the only thing protecting this account.</div>'}
+          </div>
+          <button class="btn block sm" id="mfaStart">${st.enabled ? 'Replace authenticator' : 'Set up authenticator'}</button>
+          ${st.enabled ? '<div class="dim" style="margin-top:10px;font-size:12px;">Replacing generates a new secret and invalidates the old one. Use this if you lose your authenticator — do it <b>before</b> deleting the old entry.</div>' : ''}`;
+        body.querySelector('#mfaStart').onclick = startEnrol;
+      }catch(e){
+        if(e.message === 'SCOPE') return scopeHelp();
+        fail(e.message || 'Could not read MFA status');
+      }
+    };
+
+    const startEnrol = async ()=>{
+      body.innerHTML = '<div class="dim">Generating secret…</div>';
+      let secret, account;
+      try{
+        const st = await mfaStatus().catch(()=>({username:''}));
+        account = st.username || 'account';
+        const r = await cognitoIdp('AssociateSoftwareToken');
+        secret = r.SecretCode;
+      }catch(e){
+        if(e.message === 'SCOPE') return scopeHelp();
+        /* Associating a token requires TOTP to be enabled on the POOL. With
+           mfa_configuration = "OFF" the software_token_mfa_configuration block
+           is absent and this fails — the setup screen is useless until
+           Terraform raises it to OPTIONAL. Name that rather than surfacing
+           the raw AWS error, which says nothing actionable. */
+        if(/SoftwareTokenMFANotFound|has not been enabled/i.test(e.message || '')){
+          return fail('Two-factor is turned off for this account at the server level. Set mfa_configuration to OPTIONAL in Terraform and apply, then try again.');
+        }
+        return fail(e.message || 'Could not start setup');
+      }
+
+      const uri = otpauthUri(secret, account);
+      body.innerHTML = `
+        <div class="dim" style="margin-bottom:10px;">
+          1 · Add this to your authenticator app.
+        </div>
+        <a class="btn block sm" href="${esc(uri)}" id="mfaOpen" style="margin-bottom:8px;">Open in authenticator app</a>
+        <div class="dim" style="margin-bottom:6px;font-size:12px;">Or enter the key manually:</div>
+        <div style="font-family:ui-monospace,monospace;font-size:15px;letter-spacing:1px;background:var(--panel2);padding:10px;border-radius:8px;word-break:break-all;margin-bottom:6px;" id="mfaSecret">${esc(groupSecret(secret))}</div>
+        <button class="btn sec sm block" id="mfaCopy" style="margin-bottom:14px;">Copy key</button>
+        <div class="dim" style="margin-bottom:6px;">
+          2 · Enter the 6-digit code it shows.
+        </div>
+        <input type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" id="mfaCode" placeholder="000000" style="font-size:20px;letter-spacing:4px;text-align:center;margin-bottom:10px;">
+        <button class="btn block sm" id="mfaVerify">Verify and enable</button>
+        <div class="dim" id="mfaErr" style="color:var(--bad);margin-top:10px;"></div>
+        <div class="dim" style="margin-top:12px;font-size:12px;">
+          Keep this entry until you have confirmed sign-in works. Deleting it
+          early cannot be undone from here.
+        </div>`;
+
+      body.querySelector('#mfaCopy').onclick = async ()=>{
+        try{ await navigator.clipboard.writeText(secret); toast('Key copied'); }
+        catch(e){ toast('Copy failed — select it manually'); }
+      };
+
+      body.querySelector('#mfaVerify').onclick = async ()=>{
+        const err = body.querySelector('#mfaErr');
+        const code = (body.querySelector('#mfaCode').value || '').replace(/\D/g,'');
+        if(code.length !== 6){ err.textContent = 'Enter the 6-digit code.'; return; }
+        err.textContent = '';
+        try{
+          const v = await cognitoIdp('VerifySoftwareToken', {
+            UserCode: code,
+            FriendlyDeviceName: 'Lift Log'
+          });
+          if(v.Status !== 'SUCCESS') throw new Error('Code not accepted');
+          /* Verifying associates the token; this makes it the factor Cognito
+             actually challenges. Both steps are required. */
+          await cognitoIdp('SetUserMFAPreference', {
+            SoftwareTokenMfaSettings: {Enabled: true, PreferredMfa: true}
+          });
+          toast('Two-factor enabled');
+          showStatus();
+        }catch(e){
+          if(e.message === 'SCOPE') return scopeHelp();
+          err.textContent = /EnableSoftwareTokenMFA|Code mismatch|not accepted/i.test(e.message || '')
+            ? 'That code was not accepted. Check your phone clock is correct and try the next code.'
+            : (e.message || 'Verification failed');
+        }
+      };
+    };
+
+    showStatus();
+  });
 }
 
 /* ---------- entity <-> sort key mapping ---------- */

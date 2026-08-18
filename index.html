@@ -349,14 +349,24 @@
    PART 1 — DATA MODEL, EXERCISE LIBRARY, STORAGE, MATH
    ===================================================================== */
 
+/* The single key registry. Everything this app persists is listed here — the
+   sync keys used to live in three loose consts down in PART 5, which is how
+   "clear all data" ended up missing ll_tombstones and pushing stale deletes
+   to the server on the next sync. One list, one place to look. */
 const LS = {
   profile:'ll_profile', workouts:'ll_workouts', routines:'ll_routines',
   folders:'ll_folders', customEx:'ll_customEx', active:'ll_active', bodyLog:'ll_bodyLog',
-  meta:'ll_meta', snapshots:'ll_snapshots'
+  meta:'ll_meta', snapshots:'ll_snapshots', schema:'ll_schema',
+  tokens:'ll_tokens', tombstones:'ll_tombstones', sync:'ll_sync'
 };
+
+/* Keys a device-local wipe must NOT touch. Tokens stay so "clear data" doesn't
+   silently sign you out; ll_sync stays so lastSyncAt survives and the next
+   sync doesn't drag every deleted record straight back down from the cloud. */
+const LS_KEEP_ON_CLEAR = [LS.tokens, LS.sync];
 // Bump on every deploy, alongside CACHE_VERSION in sw.js. Shown in Settings so
 // you can confirm at a glance which build the phone is actually running.
-const BUILD = 12;
+const BUILD = 13;
 
 // Measures what env(safe-area-inset-*) actually resolves to on THIS device by
 // sizing a hidden probe with them — CSS custom properties can't be read back
@@ -548,29 +558,207 @@ const BUILTIN_EX = LIB_RAW.map(r=>({
   equipment:r[3], type:r[4], custom:false
 }));
 
-/* ---------- storage ---------- */
-// Falls back to the default for missing keys, unparseable JSON, AND a stored
-// literal null/undefined (save(key, null) writes the string "null").
-function load(k, d){
-  try{
-    const v = localStorage.getItem(k);
-    if(v === null || v === '') return d;
-    const p = JSON.parse(v);
-    if(p === null || p === undefined) return d;
-    if(Array.isArray(d) && !Array.isArray(p)) return d;   // shape guard
-    return p;
-  }catch(e){ return d; }
-}
-function save(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+/* =====================================================================
+   STORE — the only thing in this file that talks to localStorage.
 
-let profile   = load(LS.profile, null);
-let workouts  = load(LS.workouts, []);
-let routines  = load(LS.routines, []);
-let folders   = load(LS.folders, []);
-let customEx  = load(LS.customEx, []);
-let bodyLog   = load(LS.bodyLog, []);
-let active    = load(LS.active, null);
-let meta      = load(LS.meta, {lastBackupAt:null, persistAsked:false});
+   Async on purpose. localStorage is synchronous, so every await here
+   resolves on the next microtask and nothing actually blocks; the point is
+   that the *call sites* are already shaped for a backend that can't answer
+   immediately (IndexedDB, or the sync API itself). Swapping the backing
+   store later then touches this block and nothing else.
+
+   Deliberately NOT rejecting. The old save() swallowed quota errors and let
+   the UI carry on, which is the right call for an app used in a gym — a
+   failed write must never break the screen you're looking at. Store.set
+   resolves true/false instead, so a fire-and-forget call can't produce an
+   unhandled rejection, and a caller that cares (takeSnapshot) can await and
+   branch on the result.
+   ===================================================================== */
+const SCHEMA_VERSION = 3;
+
+const Store = {
+  _open: false,
+
+  /* Falls back to the default for missing keys, unparseable JSON, AND a
+     stored literal null/undefined (set(key, null) writes the string "null"). */
+  async get(k, d){
+    try{
+      const v = localStorage.getItem(k);
+      if(v === null || v === '') return d;
+      const p = JSON.parse(v);
+      if(p === null || p === undefined) return d;
+      if(Array.isArray(d) && !Array.isArray(p)) return d;   // shape guard
+      return p;
+    }catch(e){ return d; }
+  },
+
+  async set(k, v){
+    try{ localStorage.setItem(k, JSON.stringify(v)); return true; }
+    catch(e){ console.warn('Store.set failed for ' + k, e); return false; }
+  },
+
+  async remove(k){
+    try{ localStorage.removeItem(k); return true; }catch(e){ return false; }
+  },
+
+  /* Wipes every registered key except LS_KEEP_ON_CLEAR. Registry-driven, so a
+     key added above is covered here without anyone remembering to add it. */
+  async clear(){
+    for(const k of Object.values(LS)){
+      if(LS_KEEP_ON_CLEAR.indexOf(k) >= 0) continue;
+      await Store.remove(k);
+    }
+    await Store.set(LS.schema, {schemaVersion: SCHEMA_VERSION});
+    return true;
+  },
+
+  /* Marks a record as locally modified. Sync resolves conflicts last-write-
+     wins on this field, so it is the one piece of record metadata the Store
+     owns outright.
+
+     Store.set does NOT stamp automatically, and that is load-bearing:
+     applyRemoteItem writes pulled records through the same path and must keep
+     the server's updatedAt. Auto-stamping would mark every pulled record as
+     locally modified, push it straight back, and sync would never settle. */
+  stamp(obj){
+    if(obj && typeof obj === 'object') obj.updatedAt = new Date().toISOString();
+    return obj;
+  },
+
+  async open(){
+    if(Store._open) return;
+    Store._open = true;
+    await loadAllState();
+    await runMigrations();
+  }
+};
+
+/* Kept as a free function because ~12 call sites read as `stamp(obj)` inline
+   inside object literals, and Store.stamp(obj) there is just noise. */
+function stamp(obj){ return Store.stamp(obj); }
+
+/* ---------- in-memory state ---------- */
+/* Declared empty and filled by loadAllState() during Store.open(). These used
+   to be `let x = load(...)` initializers evaluated at script-eval time, which
+   an async Store can't support — nothing may read these before init() awaits
+   Store.open(). Every reader is inside a function or an event handler, so the
+   only ordering that matters is init()'s first line. */
+let profile   = null;
+let workouts  = [];
+let routines  = [];
+let folders   = [];
+let customEx  = [];
+let bodyLog   = [];
+let active    = null;
+let meta      = {lastBackupAt:null, persistAsked:false};
+let tokens    = null;
+let tombstones = [];
+let syncMeta  = {lastSyncAt:null, lastError:null, lastOkAt:null};
+
+async function loadAllState(){
+  profile   = await Store.get(LS.profile, null);
+  workouts  = await Store.get(LS.workouts, []);
+  routines  = await Store.get(LS.routines, []);
+  folders   = await Store.get(LS.folders, []);
+  customEx  = await Store.get(LS.customEx, []);
+  bodyLog   = await Store.get(LS.bodyLog, []);
+  active    = await Store.get(LS.active, null);
+  meta      = await Store.get(LS.meta, {lastBackupAt:null, persistAsked:false});
+  tokens    = await Store.get(LS.tokens, null);
+  tombstones = await Store.get(LS.tombstones, []);
+  syncMeta  = await Store.get(LS.sync, {lastSyncAt:null, lastError:null, lastOkAt:null});
+}
+
+/* =====================================================================
+   MIGRATIONS
+
+   migrateRecord() is the unit of work, and it runs in three places, not one:
+   at boot over local data, on every record pulled from the cloud, and on
+   every record read out of a backup file. A device still running an older
+   build keeps writing records without set ids or startedAt, and those arrive
+   here through sync — so a boot-only migration would be undone by the next
+   pull. It is idempotent and only reports true when it actually changed
+   something.
+   ===================================================================== */
+
+/* A record the migration touched has genuinely changed, so it gets a fresh
+   updatedAt and syncs the new fields out to the other devices. The cost is a
+   one-time full push on the first load after this build ships. */
+function migrateRecord(kind, obj){
+  if(!obj || typeof obj !== 'object') return false;
+  let changed = false;
+
+  if(!obj.updatedAt){ obj.updatedAt = new Date().toISOString(); changed = true; }
+
+  if(kind === 'workout'){
+    /* date and durationSec stay exactly as they are — date is half the sync
+       sort key and every chart, filter and sort in the app reads it. The new
+       fields are additive, and derived so old workouts aren't left blank. */
+    if(!obj.startedAt && obj.date){ obj.startedAt = obj.date; changed = true; }
+    if(!obj.endedAt && obj.startedAt){
+      const t = Date.parse(obj.startedAt);
+      if(!Number.isNaN(t)){
+        obj.endedAt = new Date(t + (+obj.durationSec || 0) * 1000).toISOString();
+        changed = true;
+      }
+    }
+  }
+
+  if(kind === 'workout' || kind === 'routine'){
+    (obj.exercises || []).forEach(e=>{
+      (e && e.sets || []).forEach(s=>{
+        if(s && !s.id){ s.id = uuid(); changed = true; }
+      });
+    });
+  }
+
+  return changed;
+}
+
+function migrateCollection(kind, arr){
+  let n = 0;
+  (arr || []).forEach(o=>{ if(migrateRecord(kind, o)) n++; });
+  return n;
+}
+
+async function runMigrations(){
+  const prev = (await Store.get(LS.schema, {schemaVersion:0})).schemaVersion || 0;
+
+  /* Records are migrated unconditionally rather than gated on `prev`, because
+     the sync and import paths can drop pre-migration records in at any time.
+     The version marker is what stops the *write* on a clean boot. */
+  let touched = 0;
+  if(profile && migrateRecord('profile', profile)) touched++;
+  touched += migrateCollection('workout', workouts);
+  touched += migrateCollection('routine', routines);
+  touched += migrateCollection('folder', folders);
+  touched += migrateCollection('exercise', customEx);
+  touched += migrateCollection('body', bodyLog);
+
+  /* The in-progress session is local-only and never synced, but it still needs
+     set ids or finishSession would mint fresh ones and lose the continuity. */
+  let activeTouched = false;
+  if(active){
+    (active.exercises || []).forEach(e=>{
+      (e && e.sets || []).forEach(s=>{ if(s && !s.id){ s.id = uuid(); activeTouched = true; } });
+    });
+  }
+
+  if(touched){
+    await Store.set(LS.profile, profile);
+    await Store.set(LS.workouts, workouts);
+    await Store.set(LS.routines, routines);
+    await Store.set(LS.folders, folders);
+    await Store.set(LS.customEx, customEx);
+    await Store.set(LS.bodyLog, bodyLog);
+  }
+  if(activeTouched) await Store.set(LS.active, active);
+
+  if(prev !== SCHEMA_VERSION){
+    await Store.set(LS.schema, {schemaVersion: SCHEMA_VERSION, migratedAt: new Date().toISOString()});
+    if(touched) console.info(`Schema ${prev} → ${SCHEMA_VERSION}: migrated ${touched} record(s)`);
+  }
+}
 
 /* =====================================================================
    DATA SAFETY — persistent storage, snapshots, backup tracking
@@ -582,7 +770,7 @@ async function requestPersistence(){
     if(!navigator.storage || !navigator.storage.persist) return null;
     if(await navigator.storage.persisted()) return true;
     const granted = await navigator.storage.persist();
-    meta.persistAsked = true; save(LS.meta, meta);
+    meta.persistAsked = true; Store.set(LS.meta, meta);
     return granted;
   }catch(e){ return null; }
 }
@@ -599,9 +787,12 @@ async function storageInfo(){
 }
 
 // Everything that makes up a full backup.
+// `v` is the backup envelope format and is unchanged; schemaVersion describes
+// the records inside it, so an old file can be recognised and migrated on the
+// way in rather than being assumed current.
 function exportData(){
   return {
-    app:'lift-log', v:2, exportedAt:new Date().toISOString(),
+    app:'lift-log', v:2, schemaVersion:SCHEMA_VERSION, exportedAt:new Date().toISOString(),
     profile, workouts, routines, folders, customEx, bodyLog
   };
 }
@@ -615,22 +806,49 @@ function importData(d, opts){
   if(Array.isArray(d.folders))  folders  = d.folders;
   if(Array.isArray(d.customEx)) customEx = d.customEx;
   if(Array.isArray(d.bodyLog))  bodyLog  = d.bodyLog;
-  save(LS.profile,profile); save(LS.workouts,workouts); save(LS.routines,routines);
-  save(LS.folders,folders); save(LS.customEx,customEx); save(LS.bodyLog,bodyLog);
+
+  /* A backup file can be arbitrarily old — this is the third entry point for
+     pre-migration records, alongside boot and sync. Restoring a snapshot lands
+     here too, so a snapshot taken before this build is upgraded on restore. */
+  if(profile) migrateRecord('profile', profile);
+  migrateCollection('workout', workouts);
+  migrateCollection('routine', routines);
+  migrateCollection('folder', folders);
+  migrateCollection('exercise', customEx);
+  migrateCollection('body', bodyLog);
+  Store.set(LS.profile,profile); Store.set(LS.workouts,workouts); Store.set(LS.routines,routines);
+  Store.set(LS.folders,folders); Store.set(LS.customEx,customEx); Store.set(LS.bodyLog,bodyLog);
   return {workouts:(d.workouts||[]).length, routines:(d.routines||[]).length};
 }
 
 // Layer 3: rolling in-app snapshots (an undo, not a backup — same storage).
+// Snapshots are the largest thing we store, so this is the one write that
+// actually awaits its result: Store.set resolves false on quota, and the
+// recovery is to halve the history and try once more.
+let _snapChain = Promise.resolve();
 function takeSnapshot(reason){
-  try{
-    const snaps = load(LS.snapshots, []);
-    snaps.push({at:new Date().toISOString(), reason:reason||'auto',
-                workouts:workouts.length, data:exportData()});
-    while(snaps.length > SNAPSHOT_KEEP) snaps.shift();
-    save(LS.snapshots, snaps);
-  }catch(e){ /* quota — drop oldest and give up quietly */
-    try{ const s=load(LS.snapshots,[]); s.splice(0, Math.ceil(s.length/2)); save(LS.snapshots,s); }catch(_){}
-  }
+  /* The payload is captured HERE, synchronously, before any await. Callers do
+     `takeSnapshot('before import'); …replace every global…` and rely on this
+     returning with the old state already copied. Move exportData() past an
+     await and the snapshot silently records the post-change data — an undo
+     that undoes nothing. */
+  const entry = {at:new Date().toISOString(), reason:reason||'auto',
+                 workouts:workouts.length, data:exportData()};
+
+  // Serialised: two snapshots in flight would both read the same list and the
+  // later write would drop the earlier one.
+  _snapChain = _snapChain.then(async ()=>{
+    try{
+      const snaps = await Store.get(LS.snapshots, []);
+      snaps.push(entry);
+      while(snaps.length > SNAPSHOT_KEEP) snaps.shift();
+      if(await Store.set(LS.snapshots, snaps)) return;
+      /* quota — drop oldest and give up quietly */
+      snaps.splice(0, Math.ceil(snaps.length/2));
+      await Store.set(LS.snapshots, snaps);
+    }catch(e){ /* never let a snapshot failure break the caller */ }
+  });
+  return _snapChain;
 }
 function daysSinceBackup(){
   if(!meta.lastBackupAt) return null;
@@ -638,7 +856,7 @@ function daysSinceBackup(){
 }
 function markBackedUp(){
   meta.lastBackupAt = new Date().toISOString();
-  save(LS.meta, meta);
+  Store.set(LS.meta, meta);
   renderBackupBanner();
 }
 function backupFilename(){
@@ -661,7 +879,29 @@ function exById(id){
   return e;
 }
 function exName(id){ return exById(id).name; }
+/* uid() is kept for routines, folders and anything else already minted with
+   it. Existing ids must not be rewritten: a workout's id is half its sync sort
+   key (WORKOUT#<day>#<id>), so re-keying records that are already in DynamoDB
+   would orphan every one of them and duplicate the lot on the next pull.
+   UUIDs apply to newly created records only. */
 function uid(p){ return (p||'x')+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+
+/* crypto.randomUUID needs iOS 15.4+, and this app is explicitly built for
+   whatever phone is in your pocket in a gym basement. Fall back to
+   getRandomValues with the RFC 4122 version/variant bits set by hand. */
+function uuid(){
+  try{
+    if(crypto.randomUUID) return crypto.randomUUID();
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, x => x.toString(16).padStart(2,'0')).join('');
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+  }catch(e){
+    return uid('u');   // last resort; still unique enough to key a set
+  }
+}
 
 function unit(){ return (profile && profile.units==='kg') ? 'kg' : 'lbs'; }
 function bodyweight(){ return (profile && +profile.bodyweight) || 0; }
@@ -871,7 +1111,8 @@ let sessionTick = null;
 let priorRecordsCache = {};// exId -> records snapshot taken at session start
 
 function newSet(type, prev){
-  return {type: type||'normal', weight: prev? prev.weight : '', reps: prev? prev.reps : '',
+  return {id: uuid(),
+          type: type||'normal', weight: prev? prev.weight : '', reps: prev? prev.reps : '',
           durationSec: prev? prev.durationSec : '', distance: prev? prev.distance : '',
           rpe:'', done:false};
 }
@@ -884,7 +1125,7 @@ function startSession(opts){
   opts = opts || {};
   if(active && !confirm('A workout is already in progress. Discard it and start a new one?')) return;
   active = {
-    id: uid('w'),
+    id: uuid(),
     name: opts.name || defaultWorkoutName(),
     routineId: opts.routineId || null,
     startedAt: new Date().toISOString(),
@@ -892,7 +1133,11 @@ function startSession(opts){
     exercises: (opts.exercises || []).map(e=>({
       exId: e.exId, notes: e.notes||'', restSec: e.restSec==null?90:e.restSec,
       supersetId: e.supersetId||null,
+      /* Fresh id per set, never the routine template's. These sets are new
+         records that happen to be shaped like the template; copying the id
+         would make every session started from a routine collide with it. */
       sets: (e.sets && e.sets.length ? e.sets : [newSet('normal')]).map(s=>({
+        id: uuid(),
         type:s.type||'normal', weight:s.weight==null?'':s.weight, reps:s.reps==null?'':s.reps,
         durationSec:s.durationSec||'', distance:s.distance||'', rpe:s.rpe||'', done:false
       }))
@@ -909,7 +1154,7 @@ function defaultWorkoutName(){
   return h < 11 ? 'Morning Workout' : h < 17 ? 'Afternoon Workout' : 'Evening Workout';
 }
 
-function persistActive(){ save(LS.active, active); }
+function persistActive(){ Store.set(LS.active, active); }
 
 function openSession(){
   if(!active) return;
@@ -1219,7 +1464,7 @@ el('sessAddEx').onclick = ()=>openExercisePicker({onPick:ids=>{
 }});
 el('sessDiscard').onclick = ()=>{
   if(!confirm('Discard this workout? Nothing will be saved.')) return;
-  active = null; restTimer = null; save(LS.active, null);
+  active = null; restTimer = null; Store.set(LS.active, null);
   clearInterval(sessionTick);
   el('sessionScreen').classList.remove('on');
   renderRoutines();
@@ -1235,7 +1480,10 @@ function finishSession(){
   // strip incomplete sets
   const exercises = active.exercises.map(e=>({
     exId:e.exId, notes:e.notes, restSec:e.restSec, supersetId:e.supersetId,
+    // s.id carries through: this rebuild is the same set being saved, not a
+    // new one. The ?? guards a session that predates set ids.
     sets: e.sets.filter(s=>s.done).map(s=>({
+      id: s.id || uuid(),
       type:s.type, weight:+s.weight||0, reps:+s.reps||0,
       durationSec:+s.durationSec||0, distance:+s.distance||0,
       rpe: s.rpe===''?null:+s.rpe, done:true
@@ -1265,13 +1513,21 @@ function finishSession(){
     if(bestForEx) prList.push({name:exName(e.exId), pr:bestForEx});
   });
 
-  const w = stamp({id:active.id, name:active.name, date, durationSec, routineId:active.routineId, exercises});
+  /* Additive to date/durationSec, which stay authoritative. For a backfilled
+     workout there is no real clock to report, so the window is derived from
+     the date and the entered duration rather than the wall time spent typing
+     it in — otherwise "log a past workout" would record startedAt as today. */
+  const startedAt = active.backfillDate ? date : active.startedAt;
+  const endedAt   = new Date(Date.parse(startedAt) + durationSec * 1000).toISOString();
+
+  const w = stamp({id:active.id, name:active.name, date, startedAt, endedAt,
+                   durationSec, routineId:active.routineId, exercises});
   const existing = workouts.findIndex(x=>x.id===w.id);
   if(existing>=0) workouts[existing]=w; else workouts.push(w);
   workouts.sort((a,b)=> a.date < b.date ? -1 : 1);
-  save(LS.workouts, workouts);
+  Store.set(LS.workouts, workouts);
 
-  active = null; restTimer = null; save(LS.active, null);
+  active = null; restTimer = null; Store.set(LS.active, null);
   clearInterval(sessionTick);
   el('sessionScreen').classList.remove('on');
   showSummary(w, prList);
@@ -1449,7 +1705,7 @@ function renderRoutines(){
     routines.forEach(r=>{ if(r.folderId===b.dataset.delfolder){ r.folderId=null; stamp(r); } });
     tombstone('folder', {id:b.dataset.delfolder});
     folders = folders.filter(f=>f.id!==b.dataset.delfolder);
-    save(LS.folders, folders); save(LS.routines, routines); renderRoutines();
+    Store.set(LS.folders, folders); Store.set(LS.routines, routines); renderRoutines();
   });
 }
 
@@ -1466,19 +1722,23 @@ function openRoutineMenu(id){
       const a=n.dataset.a; closeSheet();
       if(a==='edit') openRoutineEditor(r);
       else if(a==='dup'){
-        routines.push(Object.assign({}, JSON.parse(JSON.stringify(r)), {id:uid('r'), name:r.name+' (copy)'}));
-        save(LS.routines, routines); renderRoutines();
+        // Deep copy, then re-mint every set id — a duplicate is a new record
+        // all the way down, not two routines sharing set identity.
+        const copy = Object.assign({}, JSON.parse(JSON.stringify(r)), {id:uid('r'), name:r.name+' (copy)'});
+        (copy.exercises||[]).forEach(e=>(e.sets||[]).forEach(s=>{ s.id = uuid(); }));
+        routines.push(stamp(copy));
+        Store.set(LS.routines, routines); renderRoutines();
       } else if(a==='move'){
         sheet('Move to folder',
           `<div class="menu-item" data-f="">Ungrouped</div>` +
           folders.map(f=>`<div class="menu-item" data-f="${esc(f.id)}">${esc(f.name)}</div>`).join(''),
           rt=>rt.querySelectorAll('[data-f]').forEach(x=>x.onclick=()=>{
-            r.folderId = x.dataset.f || null; save(LS.routines, routines); closeSheet(); renderRoutines();
+            r.folderId = x.dataset.f || null; Store.set(LS.routines, routines); closeSheet(); renderRoutines();
           }));
       } else if(a==='del'){
         if(confirm('Delete "'+r.name+'"?')){
           tombstone('routine', r);
-          routines = routines.filter(x=>x.id!==id); save(LS.routines, routines); renderRoutines();
+          routines = routines.filter(x=>x.id!==id); Store.set(LS.routines, routines); renderRoutines();
         }
       }
     });
@@ -1557,7 +1817,7 @@ function openRoutineEditor(existing){
       stamp(r);
       const i = routines.findIndex(x=>x.id===r.id);
       if(i>=0) routines[i]=r; else routines.push(r);
-      save(LS.routines, routines);
+      Store.set(LS.routines, routines);
       ov.remove(); renderRoutines(); toast('Routine saved');
     };
     draw();
@@ -1633,7 +1893,7 @@ function openWorkoutDetail(id){
     root.querySelector('#wdDel').onclick = ()=>{
       if(!confirm('Delete this workout?')) return;
       tombstone('workout', w);
-      workouts = workouts.filter(x=>x.id!==id); save(LS.workouts, workouts);
+      workouts = workouts.filter(x=>x.id!==id); Store.set(LS.workouts, workouts);
       closeSheet(); renderAll();
     };
   });
@@ -2021,8 +2281,8 @@ function renderProfile(){
         bodyLog = bodyLog.filter(b=>b.date!==d);
         bodyLog.push(stamp({date:d, weight:v}));
         bodyLog.sort((a,b)=>a.date<b.date?-1:1);
-        save(LS.bodyLog, bodyLog);
-        if(profile){ profile.bodyweight = v; save(LS.profile, profile); }
+        Store.set(LS.bodyLog, bodyLog);
+        if(profile){ profile.bodyweight = v; Store.set(LS.profile, profile); }
         closeSheet(); renderProfile(); toast('Logged');
       };
     }, true);
@@ -2092,7 +2352,7 @@ function openCustomExercise(){
       if(allEx().some(e=>e.id===id)) id = id+'_'+Math.random().toString(36).slice(2,5);
       customEx.push(stamp({id, name, primary:root.querySelector('#cePrimary').value, secondary:[],
                      equipment:root.querySelector('#ceEquip').value, type:root.querySelector('#ceType').value, custom:true}));
-      save(LS.customEx, customEx);
+      Store.set(LS.customEx, customEx);
       closeSheet(); renderExerciseLib(); toast('Exercise created');
     };
   }, true);
@@ -2138,8 +2398,8 @@ function showOnboarding(){
                  units:root.querySelector('#obUnits').value,
                  bodyweight:+root.querySelector('#obBw').value||0,
                  createdAt:new Date().toISOString()});
-      save(LS.profile, profile);
-      if(profile.bodyweight){ bodyLog.push({date:todayISO(), weight:profile.bodyweight}); save(LS.bodyLog, bodyLog); }
+      Store.set(LS.profile, profile);
+      if(profile.bodyweight){ bodyLog.push({date:todayISO(), weight:profile.bodyweight}); Store.set(LS.bodyLog, bodyLog); }
       seedStarterRoutines();
       closeSheet(); renderAll(); toast('You\'re all set');
     };
@@ -2160,7 +2420,7 @@ function seedStarterRoutines(){
   });
   routines.push(stamp(mk('Upper Day', ['bench_press_barbell','bent_over_row_barbell','overhead_press_dumbbell','lat_pulldown_cable','lateral_raise_dumbbell','bicep_curl_dumbbell','tricep_rope_pushdown'], 3)));
   routines.push(stamp(mk('Leg Day', ['squat_barbell','romanian_deadlift_barbell','leg_press','leg_curl_seated','leg_extension','calf_raise_standing'], 3)));
-  save(LS.folders, folders); save(LS.routines, routines);
+  Store.set(LS.folders, folders); Store.set(LS.routines, routines);
 }
 
 /* ---------- backup banner + restore ---------- */
@@ -2184,8 +2444,8 @@ function renderBackupBanner(){
   el('bannerBackup').onclick = doBackup;
 }
 
-function openRestorePoints(){
-  const snaps = load(LS.snapshots, []);
+async function openRestorePoints(){
+  const snaps = await Store.get(LS.snapshots, []);
   sheet('Restore Points', `
     <div class="muted" style="margin-bottom:12px;">Automatic snapshots taken before risky changes. These live in this browser — they undo mistakes, but they are <b>not</b> a substitute for a backup file.</div>
     ${snaps.length ? [...snaps].reverse().map((s,i)=>`
@@ -2344,16 +2604,23 @@ el('settingsBtn').onclick = ()=>{
         units: root.querySelector('#stUnits').value,
         daysPerWeek: +root.querySelector('#stDays').value||3
       }));
-      save(LS.profile, profile); closeSheet(); renderAll(); toast('Settings saved');
+      Store.set(LS.profile, profile); closeSheet(); renderAll(); toast('Settings saved');
     };
     root.querySelector('#stCsv').onclick = exportCSV;
     root.querySelector('#stClear').onclick = ()=>{
       if(workouts.length && !confirm('Back up first? Press Cancel to stop and export a file.\n\nPress OK only if you already have a backup.')) return;
       if(!confirm('Delete ALL workouts, routines and settings on this device? This cannot be undone.')) return;
-      Object.values(LS).forEach(k=>localStorage.removeItem(k));
-      profile=null; workouts=[]; routines=[]; folders=[]; customEx=[]; bodyLog=[]; active=null;
-      meta={lastBackupAt:null, persistAsked:false};
-      closeSheet(); renderAll(); showOnboarding();
+      /* Store.clear() also drops ll_tombstones, which the old inline loop
+         missed because it only walked the entity keys. Those survivors were a
+         live data-loss path: after a wipe the tombstones stayed, localItems()
+         still queued them as outgoing deletes, and the next sync applied them
+         to records on the server the user had never deleted. */
+      Store.clear().then(()=>{
+        profile=null; workouts=[]; routines=[]; folders=[]; customEx=[]; bodyLog=[]; active=null;
+        tombstones=[];
+        meta={lastBackupAt:null, persistAsked:false};
+        closeSheet(); renderAll(); showOnboarding();
+      });
     };
   });
 };
@@ -2392,7 +2659,7 @@ el('newFolderBtn').onclick = ()=>{
   const n = prompt('Folder name (e.g. Push Pull Legs)');
   if(!n || !n.trim()) return;
   folders.push(stamp({id:uid('f'), name:n.trim()}));
-  save(LS.folders, folders); renderRoutines();
+  Store.set(LS.folders, folders); renderRoutines();
 };
 
 function renderAll(){
@@ -2425,13 +2692,9 @@ const CLOUD = {
   idp:      "https://cognito-idp.us-east-1.amazonaws.com"
 };
 
-const LS_TOKENS = 'll_tokens';
-const LS_TOMB   = 'll_tombstones';
-const LS_SYNC   = 'll_sync';
-
-let tokens     = load(LS_TOKENS, null);
-let tombstones = load(LS_TOMB, []);
-let syncMeta   = load(LS_SYNC, {lastSyncAt:null, lastError:null, lastOkAt:null});
+/* tokens, tombstones and syncMeta are declared and loaded with the rest of the
+   state in PART 1 — their keys now live in the LS registry alongside
+   everything else. */
 
 const cloudConfigured = () => /^https?:\/\//.test(CLOUD.api) && !!CLOUD.clientId;
 const signedIn = () => !!(tokens && tokens.refresh_token);
@@ -2495,9 +2758,9 @@ async function cloudSignIn(){
 function cloudSignOut(){
   const hadSession = signedIn();
 
-  tokens = null; save(LS_TOKENS, null);
+  tokens = null; Store.set(LS.tokens, null);
   syncMeta = {lastSyncAt:null, lastError:null, lastOkAt:null};
-  save(LS_SYNC, syncMeta);
+  Store.set(LS.sync, syncMeta);
   sessionStorage.removeItem('ll_pkce');
   sessionStorage.removeItem('ll_state');
 
@@ -2527,7 +2790,7 @@ function storeTokens(t){
     refresh_token: t.refresh_token || (tokens && tokens.refresh_token),
     expiresAt:     Date.now() + ((+t.expires_in || 3600) * 1000)
   };
-  save(LS_TOKENS, tokens);
+  Store.set(LS.tokens, tokens);
 }
 
 /* Runs on every load. If the URL carries ?code= we just came back from the
@@ -2594,7 +2857,7 @@ async function accessToken(){
     return tokens.access_token;
   }catch(e){
     // Refresh tokens last 30 days; past that the user signs in again.
-    tokens = null; save(LS_TOKENS, null);
+    tokens = null; Store.set(LS.tokens, null);
     return null;
   }
 }
@@ -2810,10 +3073,9 @@ function openMfaSetup(){
 }
 
 /* ---------- entity <-> sort key mapping ---------- */
-function stamp(obj){
-  if(obj && typeof obj === 'object') obj.updatedAt = new Date().toISOString();
-  return obj;
-}
+/* stamp() now lives with the Store in PART 1 — updatedAt is record metadata
+   the Store owns, not a sync-layer detail. */
+
 /* One-time cleanup for records that got in before build 7's identity check.
    A remote item whose data lacked an `id` could never match an existing
    local row, so every sync appended another copy — showing up as duplicate
@@ -2832,8 +3094,8 @@ function pruneInvalid(){
   const after = [workouts.length, routines.length, folders.length, customEx.length, bodyLog.length];
   const removed = before.reduce((a,n,i)=>a+(n-after[i]), 0);
   if(removed){
-    save(LS.workouts, workouts); save(LS.routines, routines); save(LS.folders, folders);
-    save(LS.customEx, customEx); save(LS.bodyLog, bodyLog);
+    Store.set(LS.workouts, workouts); Store.set(LS.routines, routines); Store.set(LS.folders, folders);
+    Store.set(LS.customEx, customEx); Store.set(LS.bodyLog, bodyLog);
     console.warn(`Removed ${removed} malformed record(s)`);
   }
   return removed;
@@ -2847,8 +3109,8 @@ function ensureStamped(){
   workouts.forEach(fix); routines.forEach(fix);
   folders.forEach(fix); customEx.forEach(fix); bodyLog.forEach(fix);
   if(touched){
-    save(LS.profile,profile); save(LS.workouts,workouts); save(LS.routines,routines);
-    save(LS.folders,folders); save(LS.customEx,customEx); save(LS.bodyLog,bodyLog);
+    Store.set(LS.profile,profile); Store.set(LS.workouts,workouts); Store.set(LS.routines,routines);
+    Store.set(LS.folders,folders); Store.set(LS.customEx,customEx); Store.set(LS.bodyLog,bodyLog);
   }
 }
 
@@ -2872,7 +3134,7 @@ function tombstone(kind, obj){
   // can't still be needed by any device that will ever sync again.
   const cutoff = Date.now() - 90*86400000;
   tombstones = tombstones.filter(t => Date.parse(t.updatedAt) > cutoff);
-  save(LS_TOMB, tombstones);
+  Store.set(LS.tombstones, tombstones);
 }
 
 function localItems(){
@@ -2908,7 +3170,7 @@ function applyRemoteItem(item){
     if(ti >= 0){
       if(item.updatedAt > tombstones[ti].updatedAt){
         tombstones.splice(ti, 1);
-        save(LS_TOMB, tombstones);
+        Store.set(LS.tombstones, tombstones);
       } else {
         return false;   // our delete is newer; it stands
       }
@@ -2927,7 +3189,9 @@ function applyRemoteItem(item){
     if(item.deleted) return false;
     if(!profile || !profile.updatedAt || item.updatedAt > profile.updatedAt){
       profile = Object.assign({}, item.data, {updatedAt: item.updatedAt});
-      save(LS.profile, profile); return true;
+      migrateRecord('profile', profile);
+      profile.updatedAt = item.updatedAt;   // envelope wins; see the note below
+      Store.set(LS.profile, profile); return true;
     }
     return false;
   }
@@ -2943,6 +3207,15 @@ function applyRemoteItem(item){
      next push with "updatedAt must be an ISO 8601 timestamp". */
   const incoming = Object.assign({}, item.data, {updatedAt: item.updatedAt});
 
+  /* Another device may still be on an older build, writing workouts with no
+     set ids and no startedAt. Upgrade on the way in, but deliberately do NOT
+     re-stamp: the envelope's updatedAt has to stand or this record looks
+     locally modified, gets pushed straight back, and the two devices trade
+     the same row forever. The missing fields propagate when that device
+     upgrades and migrates its own copy. */
+  migrateRecord(kind.toLowerCase(), incoming);
+  incoming.updatedAt = item.updatedAt;
+
   /* Reject remote records missing the fields that identify them. A
      malformed item would otherwise render as a blank workout and be
      impossible to delete from the UI. */
@@ -2954,14 +3227,14 @@ function applyRemoteItem(item){
 
   if(item.deleted){
     if(i >= 0 && (!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt)){
-      arr.splice(i,1); save(c.key, arr); return true;
+      arr.splice(i,1); Store.set(c.key, arr); return true;
     }
     return false;
   }
 
-  if(i < 0){ arr.push(incoming); save(c.key, arr); return true; }
+  if(i < 0){ arr.push(incoming); Store.set(c.key, arr); return true; }
   if(!arr[i].updatedAt || item.updatedAt > arr[i].updatedAt){
-    arr[i] = incoming; save(c.key, arr); return true;
+    arr[i] = incoming; Store.set(c.key, arr); return true;
   }
   return false;
 }
@@ -2999,14 +3272,14 @@ async function cloudSync(opts){
     }
 
     syncMeta = {lastSyncAt: res.serverTime, lastOkAt: new Date().toISOString(), lastError: null};
-    save(LS_SYNC, syncMeta);
+    Store.set(LS.sync, syncMeta);
 
     if(changed){ renderAll(); }
     if(!opts.quiet) toast(changed ? `Synced — ${changed} update${changed>1?'s':''}` : 'Synced');
     return {pushed: outgoing.length, pulled: changed};
   }catch(e){
     syncMeta.lastError = String(e.message || e);
-    save(LS_SYNC, syncMeta);
+    Store.set(LS.sync, syncMeta);
     if(!opts.quiet) toast('Sync failed: ' + syncMeta.lastError.slice(0,60));
     return null;
   }finally{
@@ -3043,6 +3316,11 @@ function registerSW(){
 }
 
 async function init(){
+  /* First line, before anything else. Every global in PART 1 is empty until
+     this resolves, and handleAuthRedirect() below reads `tokens` — so nothing
+     that touches state may run ahead of it. */
+  await Store.open();
+
   fitAppHeight();
   ['resize','orientationchange','pageshow'].forEach(ev=>
     window.addEventListener(ev, ()=>setTimeout(fitAppHeight, 60)));
